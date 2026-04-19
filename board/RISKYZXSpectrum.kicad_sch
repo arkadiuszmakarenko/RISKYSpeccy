@@ -8791,6 +8791,10 @@
 		(uuid "86091f5a-6b2b-4eed-bd21-c3749bdd93f0")
 	)
 	(no_connect
+		(at 179.07 138.43)
+		(uuid "8a588624-4ecd-4f69-9bc2-4d3f61eefed1")
+	)
+	(no_connect
 		(at 179.07 173.99)
 		(uuid "90de0731-fa1e-44a6-9cfc-91eb889c53c5")
 	)
@@ -10563,16 +10567,6 @@
 			(justify left bottom)
 		)
 		(uuid "22c89d2c-3d3b-4a68-9b2c-28281f74c617")
-	)
-	(label "~{OE}"
-		(at 179.07 138.43 0)
-		(effects
-			(font
-				(size 1.27 1.27)
-			)
-			(justify left bottom)
-		)
-		(uuid "26c629d1-b9c4-4c3b-97fa-1ad838bf58a6")
 	)
 	(label "A11"
 		(at 74.93 154.94 180)

@@ -1,0 +1,43 @@
+# Build output directories
+Debug/
+obj/
+
+# Toolchain/linker artifacts
+*.o
+*.d
+*.a
+*.so
+*.elf
+*.axf
+*.map
+*.lst
+*.bin
+*.hex
+*.srec
+
+# Dependency and preprocessed/intermediate files
+*.su
+*.i
+*.ii
+*.tmp
+*.log
+
+# VS Code / editor / OS noise
+.vscode/
+.DS_Store
+Thumbs.db
+
+# IDE-local metadata (WCH MounRiver / Eclipse style)
+.settings/
+.mrs/
+
+# Backup files
+*~
+*.swp
+*.swo
+
+# Board backups
+*.bak
+*.bkp
+*.backup
+board_backups/
