@@ -6,6 +6,7 @@ void GPIO_Config() {
     /*Configure GPIO pin Output Level */
     GPIOA->BSHR |= GPIO_Pin_0 | GPIO_Pin_1 | GPIO_Pin_2 | GPIO_Pin_3 | GPIO_Pin_8 | GPIO_Pin_9;
     GPIOB->BSHR |= GPIO_Pin_3;
+    GPIOC->BSHR |= GPIO_Pin_9;
 
     // GPIOA->CFGLR = 0x44403333;
     GPIOA->CFGLR = 0;
@@ -36,6 +37,15 @@ void GPIO_Config() {
     GPIO_InitStructure.GPIO_Pin = GPIO_Pin_10;
     GPIO_InitStructure.GPIO_Mode = GPIO_Mode_IPU;
     GPIO_Init (GPIOB, &GPIO_InitStructure);
+
+    GPIO_InitStructure.GPIO_Pin = GPIO_Pin_6 | GPIO_Pin_7;
+    GPIO_InitStructure.GPIO_Mode = GPIO_Mode_IPU;
+    GPIO_Init (GPIOA, &GPIO_InitStructure);
+
+    GPIO_InitStructure.GPIO_Pin = GPIO_Pin_9;
+    GPIO_InitStructure.GPIO_Mode = GPIO_Mode_Out_OD;
+    GPIO_InitStructure.GPIO_Speed = GPIO_Speed_50MHz;
+    GPIO_Init (GPIOC, &GPIO_InitStructure);
 
     EXTI_InitTypeDef EXTI_InitStructure = {0};
     /* GPIOB ----> EXTI_Line10 - */

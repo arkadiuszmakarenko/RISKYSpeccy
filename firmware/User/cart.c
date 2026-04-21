@@ -42,16 +42,15 @@ void Init_Cart() {
 }
 
 void RunCart16k (void) {
-    if ((GPIOB->INDR & GPIO_Pin_5) == 0) {
+    if ((GPIOB->INDR & GPIO_Pin_5) == 0) { //Check for RD active (active low)
 
         uint16_t address = (uint16_t)GPIOE->INDR;
-        if (address <= ZX_ROM_LAST_ADDRESS) {
-            GPIOD->CFGLR = 0x33333333;
-            GPIOD->OUTDR = (GPIOD->OUTDR & ~0x00FFu) | g_zx_image[address];
-
-            while (((GPIOB->INDR & GPIO_Pin_5) == 0)) { };
-            GPIOD->CFGLR = 0x44444444;
-            EXTI->INTFR = EXTI_Line10;
+        if (address <= ZX_ROM_LAST_ADDRESS) { // Only respond to addresses within the ZX ROM range
+            GPIOD->CFGLR = 0x33333333; // Set GPIOD pins 0-7 as output
+            GPIOD->OUTDR = (GPIOD->OUTDR & ~0x00FFu) | g_zx_image[address]; // Output data to GPIOD pins 0-7
+            while (((GPIOB->INDR & GPIO_Pin_5) == 0)) { }; // Wait until RD goes inactive
+            GPIOD->CFGLR = 0x44444444; // Set GPIOD pins 0-7 back to input
+            EXTI->INTFR = EXTI_Line10; // Clear the interrupt flag for EXTI line 10 to allow the next interrupt to be triggered
         }
     }
 

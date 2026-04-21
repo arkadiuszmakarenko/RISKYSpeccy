@@ -152,7 +152,8 @@
 				"pre_script_description": "",
 				"post_script": " ${cross_prefix}${cross_objcopy}${cross_suffix} -O ihex \"${ProjName}.elf\" \"${ProjName}.hex\" && ${cross_prefix}${cross_objcopy}${cross_suffix} -O binary \"${ProjName}.elf\" \"${ProjName}.bin\"",
 				"excludeResources": [
-					"${project}/Startup/startup_ch32v30x_D8C.S"
+					"${project}/Startup/startup_ch32v30x_D8C.S",
+					"${project}/zx_src"
 				],
 				"optimization": {
 					"level": "size",
@@ -723,7 +724,7 @@
 		"address": "0x08000000",
 		"target_path": "obj/RISKYZXSpectrum.hex",
 		"clkSpeed": "High",
-		"debug_interface_mode": "",
+		"debug_interface_mode": "1-wire serial",
 		"erase": true,
 		"program": true,
 		"verify": true,
