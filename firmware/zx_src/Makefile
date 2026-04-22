@@ -9,6 +9,7 @@ export PATH := $(Z88DK)/bin:$(PATH)
 
 TARGET   = zxprog
 ROM_SIZE = 16384
+MONITOR_START ?= 0x4000
 
 OUT_ZX_C = ../User/zx_image.c
 BIN2ZX   = ./bin2zximage.py
@@ -18,6 +19,7 @@ PATCH_NMI = ./patch_nmi_vector.py
 CFLAGS = +zx -startup=2 -clib=default -SO3 \
          -subtype=bin \
 		 -m \
+		 -DMONITOR_START=$(MONITOR_START) \
          -L$(Z88DK)/libsrc
 
 .PHONY: all clean
