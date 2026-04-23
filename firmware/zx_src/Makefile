@@ -9,7 +9,7 @@ export PATH := $(Z88DK)/bin:$(PATH)
 
 TARGET   = zxprog
 ROM_SIZE = 16384
-MONITOR_START ?= 0x4000
+MONITOR_START ?= 0x3000
 
 OUT_ZX_C = ../User/zx_image.c
 BIN2ZX   = ./bin2zximage.py

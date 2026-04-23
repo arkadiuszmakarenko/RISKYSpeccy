@@ -3,6 +3,7 @@
 void GPIO_Config() {
     RCC->APB2PCENR |= RCC_APB2Periph_GPIOA | RCC_APB2Periph_GPIOB | RCC_APB2Periph_GPIOC | RCC_APB2Periph_GPIOD | RCC_APB2Periph_GPIOE | RCC_APB2Periph_AFIO;
     RCC->APB1PCENR |= RCC_APB1Periph_DAC;
+    AFIO->PCFR1 = (AFIO->PCFR1 & ~AFIO_PCFR1_SWJ_CFG) | AFIO_PCFR1_SWJ_CFG_JTAGDISABLE;
     /*Configure GPIO pin Output Level */
     GPIOA->BSHR |= GPIO_Pin_0 | GPIO_Pin_1 | GPIO_Pin_2 | GPIO_Pin_3 | GPIO_Pin_8 | GPIO_Pin_9;
     GPIOB->BSHR |= GPIO_Pin_3;
@@ -34,6 +35,15 @@ void GPIO_Config() {
     GPIO_InitStructure.GPIO_Mode = GPIO_Mode_IPU;
     GPIO_Init (GPIOB, &GPIO_InitStructure);
 
+    GPIO_InitStructure.GPIO_Pin = GPIO_Pin_4;
+    GPIO_InitStructure.GPIO_Mode = GPIO_Mode_IN_FLOATING;
+    GPIO_Init (GPIOB, &GPIO_InitStructure);
+
+    GPIO_InitStructure.GPIO_Pin = GPIO_Pin_5;
+    GPIO_InitStructure.GPIO_Mode = GPIO_Mode_IN_FLOATING;
+    GPIO_Init (GPIOB, &GPIO_InitStructure);
+
+
     GPIO_InitStructure.GPIO_Pin = GPIO_Pin_10;
     GPIO_InitStructure.GPIO_Mode = GPIO_Mode_IPU;
     GPIO_Init (GPIOB, &GPIO_InitStructure);
@@ -46,6 +56,7 @@ void GPIO_Config() {
     GPIO_InitStructure.GPIO_Mode = GPIO_Mode_Out_OD;
     GPIO_InitStructure.GPIO_Speed = GPIO_Speed_50MHz;
     GPIO_Init (GPIOC, &GPIO_InitStructure);
+
 
     EXTI_InitTypeDef EXTI_InitStructure = {0};
     /* GPIOB ----> EXTI_Line10 - */

@@ -4,15 +4,15 @@
 #include "zx.h"
 
 #pragma output CRT_ORG_CODE  = 0
-#pragma output CRT_ORG_BSS   = 0x6000
-#pragma output REGISTER_SP   = 0xFF00
+#pragma output CRT_ORG_BSS   = 0x3000
+#pragma output REGISTER_SP   = 0x3FFF
 
 extern struct fzx_font ff_ao_GenevaMonoRoman;
 static struct fzx_state fs;
 extern unsigned int in_Inkey(void);
 
 #ifndef MONITOR_START
-#define MONITOR_START 0x8000u
+#define MONITOR_START 0x3000u
 #endif
 
 #define NMI_MAILBOX_CMD_ADDR 0x8100u
