@@ -40,4 +40,8 @@ void HardFault_Handler (void) {
     }
 }
 
+void EXTI15_10_IRQHandler (void) {
+    RunCartWithRAM();
+}
+
 

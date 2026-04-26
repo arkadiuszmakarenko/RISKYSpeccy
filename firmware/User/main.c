@@ -4,13 +4,8 @@
 #include "set_memory_split.h"
 #include "usb_disk.h"
 #include "zx_bus.h"
+#include "zx_monitor.h"
 #include "zx_image.h"
-
-#define NMI_DEBOUNCE_MS 20u
-#define NMI_COOLDOWN_MS 200u
-
-
-
 
 int main (void) {
     NVIC_PriorityGroupConfig (NVIC_PriorityGroup_2);
@@ -20,10 +15,11 @@ int main (void) {
     GPIO_Config();
     USB_Initialization();
     Init_Cart();
+    ZX_Monitor_Init();
 
     printf("Hello from RISKY ZX Spectrum firmware!\n");
 
     while (1) {
-
+        ZX_Monitor_Poll();
     }
 }

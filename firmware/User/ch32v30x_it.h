@@ -15,6 +15,7 @@
 #include "debug.h"
 
 void EXTI9_5_IRQHandler(void) __attribute__((interrupt("WCH-Interrupt-fast")));
+void EXTI15_10_IRQHandler(void) __attribute__((interrupt("WCH-Interrupt-fast")));
 
 
 #endif /* __CH32V30x_IT_H */
