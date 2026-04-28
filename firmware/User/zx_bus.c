@@ -64,6 +64,7 @@ static volatile int s_rom_released = 0;
    triggers ROMCS handoff to the internal Spectrum ROM, just-in-time before
    the user code's first fetch. */
 static volatile uint16_t s_handover_addr  = 0xFFFFu;
+static volatile uint16_t s_handover_addr_b = 0xFFFFu;
 static volatile int      s_handover_armed = 0;
 static volatile int      s_handover_fired = 0;
 
@@ -702,7 +703,8 @@ void RunCartWithM1Watch (void) {
     struct ZXCartState *sp = state_pointer;
     uint16_t address = (uint16_t)GPIOE->INDR;
 
-    if ((address == s_handover_addr) && ((GPIOB->INDR & ZX_PIN_M1) == 0u)) {
+    if (((address == s_handover_addr) || (address == s_handover_addr_b)) &&
+        ((GPIOB->INDR & ZX_PIN_M1) == 0u)) {
         GPIO_ResetBits (GPIOB, GPIO_Pin_3);   /* ROMCS LOW immediately */
         s_rom_released = 1;
         s_handover_armed = 0;
@@ -969,9 +971,10 @@ int ZX_LaunchZ80 (uint16_t start_addr) {
    BUSREQ writes for late patches once the trampoline is alive). */
 int ZX_SnapshotEnter (uint16_t tramp_addr, uint16_t alive_addr,
                       uint8_t alive_value, uint32_t timeout_ms) {
-    static uint8_t s_snap_seq = 0u;
     uint8_t lo = (uint8_t)(tramp_addr & 0x00FFu);
     uint8_t hi = (uint8_t)(tramp_addr >> 8);
+    uint8_t cur_seq = 0u;
+    uint8_t next_seq = 0u;
     uint8_t alive = 0u;
     uint32_t waited = 0u;
     const uint32_t poll_period_ms = 5u;
@@ -987,8 +990,9 @@ int ZX_SnapshotEnter (uint16_t tramp_addr, uint16_t alive_addr,
        ZX_LaunchPrepare via independent statics — bump our own copy. */
     if (!ZX_CartRamWriteBlock (0x3F11u, &lo, 1u)) { return 0; }
     if (!ZX_CartRamWriteBlock (0x3F12u, &hi, 1u)) { return 0; }
-    ++s_snap_seq;
-    if (!ZX_CartRamWriteBlock (0x3F10u, &s_snap_seq, 1u)) { return 0; }
+    if (!ZX_CartRamReadBlock (0x3F10u, &cur_seq, 1u)) { return 0; }
+    next_seq = (uint8_t)(cur_seq + 1u);
+    if (!ZX_CartRamWriteBlock (0x3F10u, &next_seq, 1u)) { return 0; }
 
     ZX_TriggerNMI();
 
@@ -1017,13 +1021,17 @@ int ZX_SnapshotEnter (uint16_t tramp_addr, uint16_t alive_addr,
    to release the trampoline spin-loop.  Waits up to wait_ms for the ISR to
    fire, then performs the full ZX_RomcsRelease() tristate cleanup so the
    cart edge looks completely absent. */
-int ZX_SnapshotCommit (uint16_t handover_addr, uint16_t go_addr,
-                       uint8_t go_value, uint32_t wait_ms) {
+int ZX_SnapshotCommitDual (uint16_t handover_addr_a,
+                           uint16_t handover_addr_b,
+                           uint16_t go_addr,
+                           uint8_t go_value,
+                           uint32_t wait_ms) {
     uint32_t waited = 0u;
     int go_in_cart = 0;
 
     s_handover_fired = 0;
-    s_handover_addr  = handover_addr;
+    s_handover_addr  = handover_addr_a;
+    s_handover_addr_b = handover_addr_b;
     /* Memory barrier so the ISR sees both writes in order. */
     __asm volatile ("" ::: "memory");
     s_handover_armed = 1;
@@ -1040,12 +1048,16 @@ int ZX_SnapshotCommit (uint16_t handover_addr, uint16_t go_addr,
     if (go_in_cart) {
         if (!ZX_CartRamWriteBlock (go_addr, &go_value, 1u)) {
             s_handover_armed = 0;
+            s_handover_addr = 0xFFFFu;
+            s_handover_addr_b = 0xFFFFu;
             SetVTFIRQ ((u32)RunCartWithRAM, EXTI15_10_IRQn, 0, ENABLE);
             return 0;
         }
     } else {
         if (!ZX_BusAcquire()) {
             s_handover_armed = 0;
+            s_handover_addr = 0xFFFFu;
+            s_handover_addr_b = 0xFFFFu;
             SetVTFIRQ ((u32)RunCartWithRAM, EXTI15_10_IRQn, 0, ENABLE);
             return 0;
         }
@@ -1071,5 +1083,14 @@ int ZX_SnapshotCommit (uint16_t handover_addr, uint16_t go_addr,
 
     /* Full tristate of all cart-edge signals (same as `romcs off`). */
     ZX_RomcsRelease();
+
+    s_handover_addr = 0xFFFFu;
+    s_handover_addr_b = 0xFFFFu;
     return s_handover_fired;
+}
+
+int ZX_SnapshotCommit (uint16_t handover_addr, uint16_t go_addr,
+                       uint8_t go_value, uint32_t wait_ms) {
+    return ZX_SnapshotCommitDual (handover_addr, 0xFFFFu,
+                                  go_addr, go_value, wait_ms);
 }

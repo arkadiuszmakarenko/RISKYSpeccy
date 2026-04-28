@@ -55,6 +55,11 @@ int  ZX_SnapshotEnter  (uint16_t tramp_addr, uint16_t alive_addr,
                         uint8_t alive_value, uint32_t timeout_ms);
 int  ZX_SnapshotCommit (uint16_t handover_addr, uint16_t go_addr,
                         uint8_t go_value, uint32_t wait_ms);
+int  ZX_SnapshotCommitDual (uint16_t handover_addr_a,
+                            uint16_t handover_addr_b,
+                            uint16_t go_addr,
+                            uint8_t go_value,
+                            uint32_t wait_ms);
 
 /* Exposed so callers can size their fill buffers to match one NMI chunk */
 #define ZX_NMI_WCMD_CHUNK_EXPOSED 0x0200u

@@ -479,6 +479,7 @@ int Z80_LoadAndRun (const char *path, int transport) {
     int rc;
     uint8_t regblock[Z80L_REGBLOCK_LEN];
     uint8_t tramp[Z80L_TRAMP_LEN];
+    uint16_t handover_addr;
 
     if ((transport != Z80L_VIA_NMI) && (transport != Z80L_VIA_BUSREQ)) {
         printf ("z80: invalid transport %d\r\n", transport);
@@ -504,6 +505,15 @@ int Z80_LoadAndRun (const char *path, int transport) {
     tramp[56] = (h.iff1 != 0u) ? 0xFBu : 0x00u;   /* EI / NOP */
     tramp[58] = (uint8_t)(h.pc & 0xFFu);
     tramp[59] = (uint8_t)(h.pc >> 8);
+
+    /* If interrupts are enabled at resume and IM1 is active, the first M1
+       after EI+JP may be the interrupt vector fetch at 0x0038 (before user
+       PC fetch).  Arm handover there so ROMCS still drops deterministically. */
+    handover_addr = h.pc;
+    if ((h.iff1 != 0u) && (h.im == 1u)) {
+        handover_addr = 0x0038u;
+    }
+
     z80_build_regblock (&h, regblock);
 
     if (transport == Z80L_VIA_BUSREQ) {
@@ -613,8 +623,13 @@ int Z80_LoadAndRun (const char *path, int transport) {
      /* Common tail: arm M1 handover on the real snapshot PC and release the
          trampoline spin.  Launch workspace already lives in cart RAM. */
 
-     if (!ZX_SnapshotCommit (h.pc, Z80L_GO_ADDR,
-                            Z80L_GO_VALUE, 200u)) {
+    if (handover_addr != h.pc) {
+        printf ("z80: handover armed at %04X OR %04X (IM1+IFF1)\r\n",
+                (unsigned)handover_addr, (unsigned)h.pc);
+    }
+
+    if (!ZX_SnapshotCommitDual (handover_addr, h.pc,
+                                Z80L_GO_ADDR, Z80L_GO_VALUE, 200u)) {
         printf ("z80: snapshot commit failed (handover did not fire)\r\n");
         return Z80L_ERR_LAUNCH;
     }
