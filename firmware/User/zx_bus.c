@@ -56,6 +56,18 @@ struct ZXCartState {
 
 static struct ZXCartState s_state;
 static struct ZXCartState *state_pointer;
+static volatile int s_rom_released = 0;
+
+/* M1 handover: when armed, the cart ISR drops ROMCS the instant the Z80 does
+   an opcode (M1) fetch from s_handover_addr.  Used by the .z80 snapshot
+   loader so the very last fetch in cart-ROM space (a RET in upper RAM)
+   triggers ROMCS handoff to the internal Spectrum ROM, just-in-time before
+   the user code's first fetch. */
+static volatile uint16_t s_handover_addr  = 0xFFFFu;
+static volatile int      s_handover_armed = 0;
+static volatile int      s_handover_fired = 0;
+
+#define ZX_PIN_M1      GPIO_Pin_9
 
 static void ZX_DataBusInput (void) {
     GPIOD->CFGLR = 0x44444444;
@@ -115,6 +127,18 @@ static int ZX_BusAcquire (void) {
     ZX_CtrlLinesInput();
     ZX_AddrBusInput();
     ZX_DataBusInput();
+
+    /* If the cart edge has been tristated (post-handover), BUSREQ is a
+       floating input — GPIO_ResetBits is a no-op on inputs.  Re-arm it
+       as push-pull output so we can drive it low. */
+    if (s_rom_released) {
+        GPIO_InitTypeDef gpio = {0};
+        GPIO_SetBits (GPIOB, ZX_PIN_BUSREQ);   /* preload HIGH */
+        gpio.GPIO_Pin = ZX_PIN_BUSREQ;
+        gpio.GPIO_Mode = GPIO_Mode_Out_PP;
+        gpio.GPIO_Speed = GPIO_Speed_50MHz;
+        GPIO_Init (GPIOB, &gpio);
+    }
 
     GPIO_ResetBits (GPIOB, ZX_PIN_BUSREQ);
 
@@ -482,6 +506,64 @@ int ZX_NmiWriteBlock (uint16_t address, const uint8_t *buffer, uint16_t length, 
     return 1;
 }
 
+/* Z80-driven read: have zxprog memcpy(SRC, RBUF, LEN) on NMI, then we
+   read RBUF directly from cart RAM (no bus contention).  Use this to
+   verify what the Z80 actually sees in contended bank, since BUSREQ
+   reads of 0x4000-0x7FFF are unreliable due to ULA arbitration. */
+#define ZX_NMI_RCMD_SEQ_ADDR    0x3F20u
+#define ZX_NMI_RCMD_DONE_ADDR   0x3F21u
+#define ZX_NMI_RCMD_SRC_LO_ADDR 0x3F22u
+#define ZX_NMI_RCMD_SRC_HI_ADDR 0x3F23u
+#define ZX_NMI_RCMD_LEN_ADDR    0x3F24u
+#define ZX_NMI_RCMD_BUF_ADDR    0x3F40u
+#define ZX_NMI_RCMD_MAX_LEN     64u
+
+static uint8_t s_nmi_rcmd_seq = 0u;
+
+int ZX_NmiReadBlock (uint16_t address, uint8_t *buffer, uint8_t length, uint32_t timeout_ms) {
+    uint8_t seq;
+    uint32_t waited;
+    uint8_t done;
+    uint8_t src_lo = (uint8_t)(address & 0x00FFu);
+    uint8_t src_hi = (uint8_t)(address >> 8);
+    uint16_t i;
+
+    if ((buffer == NULL) || (length == 0u) || (length > ZX_NMI_RCMD_MAX_LEN)) {
+        return 0;
+    }
+    if (state_pointer == NULL) { return 0; }
+
+    ++s_nmi_rcmd_seq;
+    seq = s_nmi_rcmd_seq;
+
+    state_pointer->ram[ZX_NMI_RCMD_SRC_LO_ADDR - 0x3000u] = src_lo;
+    state_pointer->ram[ZX_NMI_RCMD_SRC_HI_ADDR - 0x3000u] = src_hi;
+    state_pointer->ram[ZX_NMI_RCMD_LEN_ADDR    - 0x3000u] = length;
+    __asm volatile ("" ::: "memory");
+    state_pointer->ram[ZX_NMI_RCMD_SEQ_ADDR    - 0x3000u] = seq;
+
+    ZX_TriggerNMI();
+
+    waited = 0u;
+    do {
+        done = state_pointer->ram[ZX_NMI_RCMD_DONE_ADDR - 0x3000u];
+        if (done == seq) {
+            break;
+        }
+        Delay_Ms (1u);
+        ++waited;
+    } while (waited < timeout_ms);
+
+    if (done != seq) {
+        return 0;
+    }
+
+    for (i = 0u; i < length; ++i) {
+        buffer[i] = state_pointer->ram[(ZX_NMI_RCMD_BUF_ADDR - 0x3000u) + i];
+    }
+    return 1;
+}
+
 /* Cart-side control flags mailbox (0x3F00 in cart RAM, offset 0x0F00 from RamBase 0x3000).
    Set CTRL_DRAW_SUSPEND to prevent ZX main loop from calling draw_bridge_screen()
    (which does memset(0x4000,0,6144)), allowing CH32 to write/verify screen RAM. */
@@ -529,6 +611,16 @@ void Init_Cart() {
     GPIO_Init (GPIOB, &gpio);
     GPIO_SetBits (GPIOB, ZX_PIN_BUSREQ | ZX_PIN_INT);
 
+    /* ROMCS as push-pull output. Default HIGH = cart ROM asserted (the level
+       that has been working in practice while zxprog runs normally).
+       ZX_RomcsRelease() drives LOW to disable the cart and let the internal
+       Spectrum ROM respond to 0x0000-0x3FFF. */
+    gpio.GPIO_Pin = GPIO_Pin_3;
+    gpio.GPIO_Mode = GPIO_Mode_Out_PP;
+    gpio.GPIO_Speed = GPIO_Speed_50MHz;
+    GPIO_Init (GPIOB, &gpio);
+    GPIO_SetBits (GPIOB, GPIO_Pin_3);
+
     ZX_CtrlLinesInput();
     ZX_DataBusInput();
     ZX_AddrBusInput();
@@ -558,6 +650,13 @@ void RunCart16k (void) {
 void RunCartWithRAM (void) {
     struct ZXCartState *sp = state_pointer;
     uint16_t address = (uint16_t)GPIOE->INDR;
+
+    /* When ROMCS has been released the internal Spectrum ROM owns 0x0000-0x3FFF;
+       the cart must not drive the data bus. Just clear the EXTI flag and exit. */
+    if (s_rom_released) {
+        EXTI->INTFR = sp->IRQLine;
+        return;
+    }
 
  //    if ((GPIOB->INDR & GPIO_Pin_10) != 0u) {
  //       EXTI->INTFR = EXTI_Line10;
@@ -594,4 +693,360 @@ void RunCartWithRAM (void) {
     return;
 }
 
+/* Variant of RunCartWithRAM with M1-handover detection at the top.  Used
+   only during the .z80 snapshot launch window: ZX_SnapshotCommit swaps the
+   VTF entry to point here, then back to RunCartWithRAM (or releases ROMCS)
+   after the M1 fetch fires.  Kept as a separate function so the normal cart
+   ISR has zero added cost. */
+void RunCartWithM1Watch (void) {
+    struct ZXCartState *sp = state_pointer;
+    uint16_t address = (uint16_t)GPIOE->INDR;
+
+    if ((address == s_handover_addr) && ((GPIOB->INDR & ZX_PIN_M1) == 0u)) {
+        GPIO_ResetBits (GPIOB, GPIO_Pin_3);   /* ROMCS LOW immediately */
+        s_rom_released = 1;
+        s_handover_armed = 0;
+        s_handover_fired = 1;
+        EXTI->INTFR = sp->IRQLine;
+        return;
+    }
+
+    if (s_rom_released) {
+        EXTI->INTFR = sp->IRQLine;
+        return;
+    }
+
+    if ((GPIOB->INDR & sp->PinRD) == 0u) {
+        if (address < sp->RamBase) {
+            GPIOD->CFGLR = sp->BusOn;
+            GPIOD->OUTDR = (GPIOD->OUTDR & ~sp->DataMask) | g_zx_image[address];
+            while ((GPIOB->INDR & sp->PinRD) == 0u) { }
+            GPIOD->CFGLR = sp->BusOff;
+        } else if (address <= sp->RomLast) {
+            GPIOD->CFGLR = sp->BusOn;
+            GPIOD->OUTDR = (GPIOD->OUTDR & ~sp->DataMask) | sp->ram[address - sp->RamBase];
+            while ((GPIOB->INDR & sp->PinRD) == 0u) { }
+            GPIOD->CFGLR = sp->BusOff;
+        }
+    } else {
+        while (((GPIOB->INDR & sp->PinMREQ) == 0u) && ((GPIOB->INDR & sp->PinWR) != 0u)) { }
+        if (((GPIOB->INDR & sp->PinMREQ) == 0u) && ((GPIOB->INDR & sp->PinWR) == 0u)) {
+            if ((address >= sp->RamBase) && (address <= sp->RomLast)) {
+                GPIOD->CFGLR = sp->BusOff;
+                do {
+                    sp->ram[address - sp->RamBase] = (uint8_t)(GPIOD->INDR & sp->DataMask);
+                } while ((GPIOB->INDR & sp->PinWR) == 0u);
+            }
+        }
+    }
+
+    EXTI->INTFR = sp->IRQLine;
+    return;
+}
+
 #pragma GCC pop_options
+
+/* ===== ROMCS control + launch sequence ============================== */
+
+#define ZX_PIN_ROMCS GPIO_Pin_3
+
+void ZX_RomcsAssert (void) {
+    /* Restore the idle config used while zxprog is running.  Address bus is
+       sampled by the cart ISR (input), data bus is input-default (only
+       driven during a RD response), control lines are floating inputs. */
+    GPIO_InitTypeDef gpio = {0};
+    s_rom_released = 0;
+    ZX_AddrBusInput();
+    ZX_DataBusInput();
+    ZX_CtrlLinesInput();
+    /* Re-drive ROMCS as push-pull HIGH (cart ROM selected). */
+    gpio.GPIO_Pin = ZX_PIN_ROMCS;
+    gpio.GPIO_Mode = GPIO_Mode_Out_PP;
+    gpio.GPIO_Speed = GPIO_Speed_50MHz;
+    GPIO_Init (GPIOB, &gpio);
+    GPIO_SetBits (GPIOB, ZX_PIN_ROMCS);
+    /* Re-arm the EXTI vector and unmask the line so the cart ISR runs again. */
+    SetVTFIRQ ((u32)RunCartWithRAM, EXTI15_10_IRQn, 0, ENABLE);
+    EXTI->INTFR = EXTI_Line10;
+    EXTI->INTENR |= EXTI_Line10;
+    NVIC_EnableIRQ (EXTI15_10_IRQn);
+}
+
+void ZX_RomcsRelease (void) {
+    /* Stop responding to ZX RD/WR cycles BEFORE clearing the ROMCS pin so the
+       internal Spectrum ROM is the only one driving the data bus.  Float
+       every signal we have on the cart edge so the Spectrum CPU sees a
+       cleanly empty slot (cart absent). */
+    GPIO_InitTypeDef gpio = {0};
+    s_rom_released = 1;
+    EXTI->INTENR &= ~EXTI_Line10;
+    NVIC_DisableIRQ (EXTI15_10_IRQn);
+    EXTI->INTFR = EXTI_Line10;
+    /* Disarm the VTF entry too — even with NVIC disabled and the EXTI mask
+       cleared, leaving the VTF address loaded means the core can short-circuit
+       to the cart ISR if any stray edge sneaks in. */
+    SetVTFIRQ ((u32)RunCartWithRAM, EXTI15_10_IRQn, 0, DISABLE);
+
+    /* Tristate ROMCS rather than driving low — the cart PCB / edge pin can
+       have its own bias.  Letting it float lets the host pull it to its
+       natural inactive level (cart absent). */
+    gpio.GPIO_Pin = ZX_PIN_ROMCS;
+    gpio.GPIO_Mode = GPIO_Mode_IN_FLOATING;
+    GPIO_Init (GPIOB, &gpio);
+
+    ZX_DataBusInput();
+    ZX_AddrBusInput();
+    ZX_CtrlLinesInput();
+    /* Tristate BUSREQ and NMI as well — both are open-drain so floating them
+       leaves the bus pull-ups to drive the inactive (HIGH) level naturally,
+       and the Spectrum sees no MCU influence. */
+    gpio.GPIO_Pin = ZX_PIN_BUSREQ | ZX_PIN_INT;
+    gpio.GPIO_Mode = GPIO_Mode_IN_FLOATING;
+    GPIO_Init (GPIOB, &gpio);
+}
+
+int ZX_RomcsIsReleased (void) {
+    return s_rom_released;
+}
+
+/* Launch mailbox in cart RAM (must match LAUNCH_*_ADDR in zxprog.c) */
+#define ZX_LAUNCH_SEQ_ADDR    0x3F10u
+#define ZX_LAUNCH_TGT_LO_ADDR 0x3F11u
+#define ZX_LAUNCH_TGT_HI_ADDR 0x3F12u
+
+/* Trampoline placed in upper ZX RAM. Layout MUST match the byte sequence
+   below: bytes [27]/[28] are the LD HL,nn operand patched with the start
+   address.  Sets IY = 0x5C3A (Spectrum sysvar base) so the 50Hz ROM ISR
+   can use (IY+offset) without trashing random memory. */
+static const uint8_t ZX_LAUNCH_TRAMPOLINE[] = {
+    0xF3,                          /* DI                              */
+    0x3E, 0xAA,                    /* LD A, 0xAA                       */
+    0x32, 0xFD, 0xFF,              /* LD (0xFFFD), A   ; alive flag    */
+    0x3A, 0xFE, 0xFF,              /* wait: LD A, (0xFFFE)             */
+    0xFE, 0x55,                    /* CP 0x55                          */
+    0x20, 0xF9,                    /* JR NZ, wait (-7)                 */
+    0x31, 0x40, 0xFF,              /* LD SP, 0xFF40                    */
+    0x3E, 0x3F,                    /* LD A, 0x3F                       */
+    0xED, 0x47,                    /* LD I, A                          */
+    0xFD, 0x21, 0x3A, 0x5C,        /* LD IY, 0x5C3A   ; sysvar base    */
+    0xED, 0x56,                    /* IM 1                             */
+    0xFB,                          /* EI                               */
+    0x21, 0x00, 0x00,              /* LD HL, <start_addr>  patched at 27,28 */
+    0xE9                           /* JP (HL)                          */
+};
+#define ZX_LAUNCH_TRAMPOLINE_ADDR  0xFFC0u
+#define ZX_LAUNCH_ALIVE_ADDR       0xFFFDu
+#define ZX_LAUNCH_GO_ADDR          0xFFFEu
+#define ZX_LAUNCH_ALIVE_VALUE      0xAAu
+#define ZX_LAUNCH_GO_VALUE         0x55u
+
+int ZX_LaunchPrepare (uint16_t start_addr) {
+    static uint8_t s_launch_seq = 0u;
+    uint8_t buf[sizeof (ZX_LAUNCH_TRAMPOLINE)];
+    uint8_t lo;
+    uint8_t hi;
+    uint8_t alive = 0u;
+    uint8_t verify[8] = {0};
+    uint32_t waited = 0u;
+    const uint32_t poll_period_ms = 5u;
+    const uint32_t poll_total_ms  = 1000u;
+
+    /* Build trampoline with start address baked into LD HL,nn (operand at
+       offsets 28-29; opcode 0x21 at offset 27). */
+    {
+        uint16_t i;
+        for (i = 0u; i < (uint16_t)sizeof (buf); ++i) {
+            buf[i] = ZX_LAUNCH_TRAMPOLINE[i];
+        }
+        buf[28] = (uint8_t)(start_addr & 0x00FFu);
+        buf[29] = (uint8_t)(start_addr >> 8);
+    }
+
+    /* Clear go-flag first (so an old 0x55 left over doesn't fire prematurely). */
+    {
+        uint8_t zero[2] = {0u, 0u};
+        if (!ZX_NmiWriteBlock (ZX_LAUNCH_ALIVE_ADDR, zero, 2u, 200u)) {
+            printf ("launch: clear-flags NMI write failed\r\n");
+            return 0;
+        }
+    }
+
+    /* Install the trampoline at 0xFFC0 via NMI write (works in any RAM). */
+    if (!ZX_NmiWriteBlock (ZX_LAUNCH_TRAMPOLINE_ADDR, buf,
+                           (uint16_t)sizeof (buf), 200u)) {
+        printf ("launch: trampoline NMI write failed\r\n");
+        return 0;
+    }
+
+    /* Read trampoline back to verify the NMI write actually landed in RAM. */
+    if (ZX_BusReadBlock (ZX_LAUNCH_TRAMPOLINE_ADDR, verify, 8u)) {
+        printf ("launch: tramp[0..7] = %02X %02X %02X %02X %02X %02X %02X %02X (expect F3 3E AA 32 FD FF 3A FE)\r\n",
+                verify[0], verify[1], verify[2], verify[3],
+                verify[4], verify[5], verify[6], verify[7]);
+    } else {
+        printf ("launch: trampoline readback BUSREQ failed\r\n");
+    }
+
+    /* Set up launch mailbox in cart RAM and bump the sequence number. */
+    lo = (uint8_t)(ZX_LAUNCH_TRAMPOLINE_ADDR & 0x00FFu);
+    hi = (uint8_t)(ZX_LAUNCH_TRAMPOLINE_ADDR >> 8);
+    if (!ZX_CartRamWriteBlock (ZX_LAUNCH_TGT_LO_ADDR, &lo, 1u)) { printf ("launch: cart tgt_lo failed\r\n"); return 0; }
+    if (!ZX_CartRamWriteBlock (ZX_LAUNCH_TGT_HI_ADDR, &hi, 1u)) { printf ("launch: cart tgt_hi failed\r\n"); return 0; }
+    ++s_launch_seq;
+    if (!ZX_CartRamWriteBlock (ZX_LAUNCH_SEQ_ADDR, &s_launch_seq, 1u)) { printf ("launch: cart seq failed\r\n"); return 0; }
+    printf ("launch: seq=%u target=%04X, triggering NMI\r\n",
+            (unsigned)s_launch_seq, (unsigned)ZX_LAUNCH_TRAMPOLINE_ADDR);
+
+    /* Trigger NMI; cart-ROM NMI handler will redirect Z80 PC to the trampoline. */
+    ZX_TriggerNMI();
+
+    /* Poll the trampoline's alive byte over BUSREQ. */
+    while (waited < poll_total_ms) {
+        Delay_Ms (poll_period_ms);
+        waited += poll_period_ms;
+        if (ZX_BusReadBlock (ZX_LAUNCH_ALIVE_ADDR, &alive, 1u) &&
+            (alive == ZX_LAUNCH_ALIVE_VALUE)) {
+            printf ("launch: alive after %lums\r\n", (unsigned long)waited);
+            return 1;
+        }
+    }
+    /* Failure diagnostics: peek ZX BSS at _wcmd_last_seq / _launch_last_seq
+       / _launch_pending / _launch_target (BE74..BE78 in the minimal zxprog
+       BSS) and re-read the cart-side LAUNCH_SEQ shadow so we can tell where
+       in the chain we got stuck. */
+    {
+        uint8_t bss[5] = {0};
+        uint8_t cart_seq = 0u;
+        uint8_t cart_tgt[2] = {0};
+        (void)ZX_BusReadBlock (0xBE74u, bss, 5u);
+        if (state_pointer != NULL) {
+            cart_seq    = state_pointer->ram[ZX_LAUNCH_SEQ_ADDR    - 0x3000u];
+            cart_tgt[0] = state_pointer->ram[ZX_LAUNCH_TGT_LO_ADDR - 0x3000u];
+            cart_tgt[1] = state_pointer->ram[ZX_LAUNCH_TGT_HI_ADDR - 0x3000u];
+        }
+        printf ("launch: alive=%02X wcmd_seq=%02X launch_seq=%02X _pending=%02X _target=%02X%02X cart seq=%02X tgt=%02X%02X\r\n",
+                alive, bss[0], bss[1], bss[2], bss[4], bss[3],
+                cart_seq, cart_tgt[1], cart_tgt[0]);
+    }
+    return 0;
+}
+
+int ZX_LaunchCommit (void) {
+    /* Z80 is sitting in the trampoline spin-loop reading 0xFFFE.  We must
+       drop ROMCS *while the bus is held* so the Z80 wakes up with the
+       internal Spectrum ROM already mapped at 0x0000-0x3FFF.  Otherwise the
+       very first thing the launched code (or its 50 Hz ISR at 0x0038, or any
+       RST/ROM-call) does is fetch from cart ROM, which is still zxprog. */
+    if (!ZX_BusAcquire()) {
+        return 0;
+    }
+    (void)ZX_BusWriteCycle (ZX_LAUNCH_GO_ADDR, ZX_LAUNCH_GO_VALUE);
+
+    /* ZX_RomcsRelease() tristates ROMCS first, then control/data/address,
+       then finally floats BUSREQ — at that moment the Z80 takes the bus
+       back with the internal ROM live.  No explicit ZX_BusRelease() is
+       needed because Romcs release floats BUSREQ itself. */
+    ZX_RomcsRelease();
+    return 1;
+}
+
+int ZX_LaunchZ80 (uint16_t start_addr) {
+    if (!ZX_LaunchPrepare (start_addr)) {
+        return 0;
+    }
+    return ZX_LaunchCommit();
+}
+
+/* ===== Snapshot launch (used by .z80 loader) ====================== */
+
+/* Stage a snapshot trampoline at tramp_addr (already written to ZX RAM by
+   the caller), redirect Z80 PC into it via the existing zxprog NMI mailbox,
+   and poll the trampoline's alive byte over BUSREQ.  Returns 1 on success.
+
+   Caller is responsible for placing the trampoline bytes, the register
+   block, the M1-handover RET byte and the user PC on the snapshot stack
+   BEFORE calling this (typically a mix of NMI-writes for the bulk body and
+   BUSREQ writes for late patches once the trampoline is alive). */
+int ZX_SnapshotEnter (uint16_t tramp_addr, uint16_t alive_addr,
+                      uint8_t alive_value, uint32_t timeout_ms) {
+    static uint8_t s_snap_seq = 0u;
+    uint8_t lo = (uint8_t)(tramp_addr & 0x00FFu);
+    uint8_t hi = (uint8_t)(tramp_addr >> 8);
+    uint8_t alive = 0u;
+    uint32_t waited = 0u;
+    const uint32_t poll_period_ms = 5u;
+
+    if (state_pointer == NULL) { return 0; }
+
+    /* Reuse the existing zxprog launch mailbox so the cart-ROM NMI handler
+       redirects Z80 PC to tramp_addr.  Sequence number is shared with
+       ZX_LaunchPrepare via independent statics — bump our own copy. */
+    if (!ZX_CartRamWriteBlock (0x3F11u, &lo, 1u)) { return 0; }
+    if (!ZX_CartRamWriteBlock (0x3F12u, &hi, 1u)) { return 0; }
+    ++s_snap_seq;
+    if (!ZX_CartRamWriteBlock (0x3F10u, &s_snap_seq, 1u)) { return 0; }
+
+    ZX_TriggerNMI();
+
+    while (waited < timeout_ms) {
+        Delay_Ms (poll_period_ms);
+        waited += poll_period_ms;
+        if (ZX_BusReadBlock (alive_addr, &alive, 1u) && (alive == alive_value)) {
+            printf ("snap: trampoline alive after %lums\r\n", (unsigned long)waited);
+            return 1;
+        }
+    }
+    printf ("snap: trampoline did not come alive (alive=%02X target=%04X)\r\n",
+            alive, (unsigned)tramp_addr);
+    return 0;
+}
+
+/* Arm M1 handover so the cart ISR atomically drops ROMCS the instant the
+   Z80 fetches an opcode at handover_addr, then write the go-byte (BUSREQ)
+   to release the trampoline spin-loop.  Waits up to wait_ms for the ISR to
+   fire, then performs the full ZX_RomcsRelease() tristate cleanup so the
+   cart edge looks completely absent. */
+int ZX_SnapshotCommit (uint16_t handover_addr, uint16_t go_addr,
+                       uint8_t go_value, uint32_t wait_ms) {
+    uint32_t waited = 0u;
+
+    s_handover_fired = 0;
+    s_handover_addr  = handover_addr;
+    /* Memory barrier so the ISR sees both writes in order. */
+    __asm volatile ("" ::: "memory");
+    s_handover_armed = 1;
+
+    /* Swap the cart ISR to the M1-watching variant.  This adds the address
+       compare + M1 sample to the hot path only for the brief launch window;
+       the normal cart ISR (RunCartWithRAM) has zero added cost. */
+    SetVTFIRQ ((u32)RunCartWithM1Watch, EXTI15_10_IRQn, 0, ENABLE);
+
+    /* Release trampoline spin via BUSREQ-write of go-byte. */
+    if (!ZX_BusAcquire()) {
+        s_handover_armed = 0;
+        SetVTFIRQ ((u32)RunCartWithRAM, EXTI15_10_IRQn, 0, ENABLE);
+        return 0;
+    }
+    (void)ZX_BusWriteCycle (go_addr, go_value);
+    ZX_BusRelease();
+
+    /* Wait for ISR to fire on the M1 fetch.  At 3.5 MHz the trampoline
+       (~80 T-states from go-read to JP target) finishes in ~30us. */
+    while ((waited < wait_ms) && !s_handover_fired) {
+        Delay_Ms (1u);
+        ++waited;
+    }
+
+    if (!s_handover_fired) {
+        printf ("snap: M1 handover did not fire within %lums\r\n",
+                (unsigned long)wait_ms);
+        s_handover_armed = 0;
+        /* Fall through and force release anyway — Z80 may still be running
+           if the trampoline took an unexpected path; tristating everything
+           lets the user reset. */
+    }
+
+    /* Full tristate of all cart-edge signals (same as `romcs off`). */
+    ZX_RomcsRelease();
+    return s_handover_fired;
+}

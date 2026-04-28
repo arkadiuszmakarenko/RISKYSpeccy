@@ -1,28 +1,31 @@
+/* Minimal zxprog: NMI-driven memory writer + launch trap.
+ *
+ * Code at 0x0000 (cart ROM).  BSS+stack moved to a tiny region at
+ * 0xBE00..0xBEFF so it stays clear of typical snapshot usage in the
+ * 0x4000-0xBDFF range.  No screen output, no bridge/view/draw helpers
+ * — those have been removed because the CH32-side console + .z80
+ * loader no longer need them.
+ *
+ * Mailboxes (cart RAM, 0x3000-0x3FFF — written by CH32, read here):
+ *   WCMD   0x302E..0x3033 + 0x3034.. data window  — generic NMI-write
+ *   LAUNCH 0x3F10..0x3F12                          — redirect Z80 PC
+ *
+ * Protocol (WCMD): CH32 writes DST, LEN, DATA, then bumps SEQ.  We
+ * memcpy(DATA -> DST) and write SEQ back to DONE.  CH32 polls DONE.
+ *
+ * Protocol (LAUNCH): CH32 writes target then bumps SEQ.  We set
+ * launch_pending; the NMI return wrapper then pops launch_target into
+ * PC instead of resuming our main loop.
+ */
+
 #include <string.h>
-#include <rect.h>
-#include <font/fzx.h>
 #include "zx.h"
 
 #pragma output CRT_ORG_CODE  = 0
-#pragma output CRT_ORG_BSS   = 0x8800
-#pragma output REGISTER_SP   = 0x8AFF
+#pragma output CRT_ORG_BSS   = 0xBE00
+#pragma output REGISTER_SP   = 0xBEFF
 
-#define BRIDGE_SEQ_ADDR  0x3000u
-#define BRIDGE_LEN_ADDR  0x3001u
-#define BRIDGE_TEXT_ADDR 0x3002u
-#define BRIDGE_MAX_TEXT  40u
-#define VIEW_SEQ_ADDR    0x302Au
-#define VIEW_ADDR_LO     0x302Bu
-#define VIEW_ADDR_HI     0x302Cu
-#define VIEW_LEN_ADDR    0x302Du
-#define VIEW_MAX_BYTES   16u
-
-/* Control flags mailbox (0x3F00) — written by CH32, read by ZX */
-#define CTRL_FLAGS_ADDR   0x3F00u
-#define CTRL_DRAW_SUSPEND 0x01u  /* set by CH32 to pause screen drawing */
-#define CTRL_FLAGS        (*((volatile unsigned char *)CTRL_FLAGS_ADDR))
-
-/* NMI write-command mailbox (0x302E-0x3F33) */
+/* WCMD mailbox */
 #define WCMD_SEQ_ADDR    0x302Eu
 #define WCMD_DONE_ADDR   0x302Fu
 #define WCMD_DST_LO_ADDR 0x3030u
@@ -30,33 +33,23 @@
 #define WCMD_LEN_LO_ADDR 0x3032u
 #define WCMD_LEN_HI_ADDR 0x3033u
 #define WCMD_DATA_ADDR   0x3034u
-#define WCMD_MAX_DATA    0x0F00u  /* 3840 bytes max per chunk */
+#define WCMD_MAX_DATA    0x0F00u    /* 3840 bytes max per chunk */
 
-extern struct fzx_font ff_ao_GenevaMonoRoman;
+/* LAUNCH mailbox */
+#define LAUNCH_SEQ_ADDR    0x3F10u
+#define LAUNCH_TGT_LO_ADDR 0x3F11u
+#define LAUNCH_TGT_HI_ADDR 0x3F12u
 
-static struct fzx_state fs;
-static volatile unsigned char bridge_last_seq;
-static volatile unsigned char bridge_dirty;
-static volatile unsigned char view_last_seq;
-static volatile unsigned char wcmd_last_seq;
-static volatile unsigned char nmi_border_color;
-static char bridge_line[BRIDGE_MAX_TEXT + 1u];
-static unsigned int view_addr;
-static unsigned char view_len;
-static unsigned char view_bytes[VIEW_MAX_BYTES];
-static unsigned int wcmd_last_dst;
-static unsigned int wcmd_last_len;
-static unsigned int wcmd_total_bytes;
-
-static const struct r_Rect16 screen = {0, 256, 0, 192};
-
-#define BRIDGE_SEQ   (*((volatile unsigned char *)BRIDGE_SEQ_ADDR))
-#define BRIDGE_LEN   (*((volatile unsigned char *)BRIDGE_LEN_ADDR))
-#define BRIDGE_TEXT  ((volatile unsigned char *)BRIDGE_TEXT_ADDR)
-#define VIEW_SEQ     (*((volatile unsigned char *)VIEW_SEQ_ADDR))
-#define VIEW_ADDRL   (*((volatile unsigned char *)VIEW_ADDR_LO))
-#define VIEW_ADDRH   (*((volatile unsigned char *)VIEW_ADDR_HI))
-#define VIEW_LEN     (*((volatile unsigned char *)VIEW_LEN_ADDR))
+/* RCMD mailbox: Z80-driven read.  CH32 writes SRC,LEN, bumps SEQ;
+   NMI handler does memcpy(RBUF, SRC, LEN) and writes SEQ back to DONE.
+   CH32 then reads RBUF directly via cart RAM shadow.  Max 64 bytes. */
+#define RCMD_SEQ_ADDR      0x3F20u
+#define RCMD_DONE_ADDR     0x3F21u
+#define RCMD_SRC_LO_ADDR   0x3F22u
+#define RCMD_SRC_HI_ADDR   0x3F23u
+#define RCMD_LEN_ADDR      0x3F24u
+#define RCMD_BUF_ADDR      0x3F40u
+#define RCMD_MAX_LEN       64u
 
 #define WCMD_SEQ     (*((volatile unsigned char *)WCMD_SEQ_ADDR))
 #define WCMD_DONE    (*((volatile unsigned char *)WCMD_DONE_ADDR))
@@ -64,7 +57,25 @@ static const struct r_Rect16 screen = {0, 256, 0, 192};
 #define WCMD_DST_HI  (*((volatile unsigned char *)WCMD_DST_HI_ADDR))
 #define WCMD_LEN_LO  (*((volatile unsigned char *)WCMD_LEN_LO_ADDR))
 #define WCMD_LEN_HI  (*((volatile unsigned char *)WCMD_LEN_HI_ADDR))
-#define WCMD_DATA    ((volatile unsigned char *)WCMD_DATA_ADDR)
+
+#define LAUNCH_SEQ    (*((volatile unsigned char *)LAUNCH_SEQ_ADDR))
+#define LAUNCH_TGT_LO (*((volatile unsigned char *)LAUNCH_TGT_LO_ADDR))
+#define LAUNCH_TGT_HI (*((volatile unsigned char *)LAUNCH_TGT_HI_ADDR))
+
+#define RCMD_SEQ     (*((volatile unsigned char *)RCMD_SEQ_ADDR))
+#define RCMD_DONE    (*((volatile unsigned char *)RCMD_DONE_ADDR))
+#define RCMD_SRC_LO  (*((volatile unsigned char *)RCMD_SRC_LO_ADDR))
+#define RCMD_SRC_HI  (*((volatile unsigned char *)RCMD_SRC_HI_ADDR))
+#define RCMD_LEN     (*((volatile unsigned char *)RCMD_LEN_ADDR))
+
+static volatile unsigned char wcmd_last_seq;
+static volatile unsigned char launch_last_seq;
+static volatile unsigned char rcmd_last_seq;
+
+/* Globals (not static): the asm wrapper references _launch_pending and
+   _launch_target, so they need public symbols. */
+unsigned char launch_pending;
+unsigned int  launch_target;
 
 #asm
 nmi_irq_wrapper:
@@ -84,6 +95,15 @@ nmi_irq_wrapper:
 
     call _nmi_handler_c
 
+    ; Launch trap: if _launch_pending != 0, replace the original NMI-saved PC
+    ; on the Z80 stack with _launch_target so the wrapper exits to the
+    ; launch trampoline instead of resuming the main poll loop.  Plain RET is
+    ; used (not RETN) so IFF1 stays cleared until the trampoline runs DI/EI
+    ; explicitly.
+    ld a, (_launch_pending)
+    or a
+    jp nz, nmi_do_launch
+
     pop hl
     pop de
     pop bc
@@ -98,141 +118,20 @@ nmi_irq_wrapper:
     pop bc
     pop af
     retn
+
+nmi_do_launch:
+    xor a
+    ld (_launch_pending), a
+    ; Drop the 10 wrapper-saved registers (20 bytes) without restoring.
+    ld hl, 20
+    add hl, sp
+    ld sp, hl
+    ; SP now points at the original NMI-pushed PC slot.  Replace it.
+    pop af                         ; discard original PC
+    ld hl, (_launch_target)
+    push hl
+    ret                            ; pop launch_target into PC, IFF1 stays 0
 #endasm
-
-static char hex_digit(unsigned char nibble) {
-    nibble &= 0x0Fu;
-    return (nibble < 10u) ? (char)('0' + nibble) : (char)('A' + (nibble - 10u));
-}
-
-static void hex8_to_str(unsigned char value, char *out) {
-    out[0] = hex_digit((unsigned char)(value >> 4));
-    out[1] = hex_digit(value);
-    out[2] = 0;
-}
-
-static void hex16_to_str(unsigned int value, char *out) {
-    out[0] = hex_digit((unsigned char)(value >> 12));
-    out[1] = hex_digit((unsigned char)(value >> 8));
-    out[2] = hex_digit((unsigned char)(value >> 4));
-    out[3] = hex_digit((unsigned char)value);
-    out[4] = 0;
-}
-
-static void format_view_line(char *out, unsigned char start, unsigned char count) {
-    unsigned char i;
-    char hx[3];
-
-    for (i = 0u; i < count; ++i) {
-        hex8_to_str(view_bytes[start + i], hx);
-        *out++ = hx[0];
-        *out++ = hx[1];
-        if ((unsigned char)(i + 1u) != count) {
-            *out++ = ' ';
-        }
-    }
-    *out = 0;
-}
-
-static void draw_bridge_screen(void) {
-    char addr_text[5];
-    char line0[(8u * 3u) + 1u];
-    char line1[(8u * 3u) + 1u];
-    unsigned char first_count;
-    unsigned char second_count;
-
-    memset((void *)0x4000, 0x00, 6144);
-    memset((void *)0x5800, 0x38, 768);
-
-    fzx_at(&fs, 0, 16);
-    fzx_puts(&fs, "USART -> ZX bridge");
-    fzx_at(&fs, 0, 48);
-    fzx_puts(&fs, "Host:");
-    fzx_at(&fs, 0, 64);
-    fzx_puts(&fs, bridge_line);
-
-    if (view_len != 0u) {
-        hex16_to_str(view_addr, addr_text);
-        fzx_at(&fs, 0, 96);
-        fzx_puts(&fs, "RAM ");
-        fzx_puts(&fs, addr_text);
-        fzx_puts(&fs, ":");
-
-        first_count = (view_len > 8u) ? 8u : view_len;
-        format_view_line(line0, 0u, first_count);
-        fzx_at(&fs, 0, 112);
-        fzx_puts(&fs, line0);
-
-        second_count = (view_len > 8u) ? (unsigned char)(view_len - 8u) : 0u;
-        if (second_count != 0u) {
-            format_view_line(line1, 8u, second_count);
-            fzx_at(&fs, 0, 128);
-            fzx_puts(&fs, line1);
-        }
-    } else {
-        fzx_at(&fs, 0, 96);
-        fzx_puts(&fs, "RAM viewer idle");
-    }
-
-    if (wcmd_total_bytes != 0u) {
-        char waddr[5];
-        char wlen[6];
-        unsigned int n = wcmd_total_bytes;
-        unsigned char d;
-        unsigned char i;
-        hex16_to_str(wcmd_last_dst, waddr);
-        /* format wcmd_total_bytes as decimal */
-        i = 5u;
-        wlen[i] = 0;
-        do {
-            d = (unsigned char)(n % 10u);
-            wlen[--i] = (char)('0' + d);
-            n /= 10u;
-        } while (n != 0u && i != 0u);
-        fzx_at(&fs, 0, 144);
-        fzx_puts(&fs, "NMI Wr ");
-        fzx_puts(&fs, waddr);
-        fzx_puts(&fs, " tot:");
-        fzx_puts(&fs, wlen + i);
-    }
-}
-
-static void bridge_poll_update(void) {
-    unsigned char seq = BRIDGE_SEQ;
-
-    if (seq != bridge_last_seq) {
-        unsigned char i;
-        unsigned char len = BRIDGE_LEN;
-
-        if (len > BRIDGE_MAX_TEXT) {
-            len = BRIDGE_MAX_TEXT;
-        }
-
-        for (i = 0u; i < len; ++i) {
-            bridge_line[i] = (char)BRIDGE_TEXT[i];
-        }
-        bridge_line[len] = 0;
-        bridge_last_seq = seq;
-        bridge_dirty = 1u;
-    }
-}
-
-static void view_poll_config(void) {
-    unsigned char seq = VIEW_SEQ;
-
-    if (seq != view_last_seq) {
-        unsigned char len = VIEW_LEN;
-
-        if (len > VIEW_MAX_BYTES) {
-            len = VIEW_MAX_BYTES;
-        }
-
-        view_addr = (unsigned int)VIEW_ADDRL | ((unsigned int)VIEW_ADDRH << 8);
-        view_len = len;
-        view_last_seq = seq;
-        bridge_dirty = 1u;
-    }
-}
 
 static void wcmd_poll(void) {
     unsigned char seq = WCMD_SEQ;
@@ -247,69 +146,68 @@ static void wcmd_poll(void) {
 
         memcpy((void *)dst, (void *)WCMD_DATA_ADDR, len);
 
-        wcmd_last_dst = dst;
-        wcmd_last_len = len;
-        wcmd_total_bytes = (unsigned int)(wcmd_total_bytes + len);
-
         WCMD_DONE = seq;
         wcmd_last_seq = seq;
-        bridge_dirty = 1u;
     }
 }
 
-static void view_poll_bytes(void) {
-    unsigned char i;
-    unsigned char changed = 0u;
+static void launch_poll(void) {
+    unsigned char seq = LAUNCH_SEQ;
 
-    for (i = 0u; i < view_len; ++i) {
-        unsigned char value = *((volatile unsigned char *)(view_addr + i));
-        if (view_bytes[i] != value) {
-            view_bytes[i] = value;
-            changed = 1u;
-        }
+    if (seq != launch_last_seq) {
+        launch_target  = (unsigned int)LAUNCH_TGT_LO
+                       | ((unsigned int)LAUNCH_TGT_HI << 8);
+        launch_last_seq = seq;
+        launch_pending  = 1u;
     }
+}
 
-    if (changed != 0u) {
-        bridge_dirty = 1u;
+static void rcmd_poll(void) {
+    unsigned char seq = RCMD_SEQ;
+
+    if (seq != rcmd_last_seq) {
+        unsigned int src = (unsigned int)RCMD_SRC_LO | ((unsigned int)RCMD_SRC_HI << 8);
+        unsigned char len = RCMD_LEN;
+
+        if (len > RCMD_MAX_LEN) {
+            len = RCMD_MAX_LEN;
+        }
+
+        memcpy((void *)RCMD_BUF_ADDR, (void *)src, len);
+
+        RCMD_DONE = seq;
+        rcmd_last_seq = seq;
     }
 }
 
 void nmi_handler_c(void) {
-    bridge_poll_update();
-    view_poll_config();
     wcmd_poll();
-
-    nmi_border_color = (unsigned char)((nmi_border_color + 1u) & 0x07u);
-    zx_border(nmi_border_color);
+    launch_poll();
+    rcmd_poll();
 }
 
 void main(void) {
-    fzx_state_init(&fs, &ff_ao_GenevaMonoRoman, (struct r_Rect16 *)&screen);
-    fs.fgnd_attr = 0x38;
-    fs.fgnd_mask = 0x00;
-
-    bridge_last_seq = BRIDGE_SEQ;
-    view_last_seq = VIEW_SEQ;
-    wcmd_last_seq = WCMD_SEQ;
-    bridge_dirty = 1u;
-    nmi_border_color = BLUE;
-    bridge_line[0] = 0;
-    view_addr = 0x8000u;
-    view_len = 0u;
-    wcmd_last_dst = 0u;
-    wcmd_last_len = 0u;
-    wcmd_total_bytes = 0u;
-    memset(view_bytes, 0, sizeof(view_bytes));
+    wcmd_last_seq   = WCMD_SEQ;
+    launch_last_seq = LAUNCH_SEQ;
+    rcmd_last_seq   = RCMD_SEQ;
+    launch_pending  = 0u;
+    launch_target   = 0u;
 
     while (1) {
-        bridge_poll_update();
-        view_poll_config();
         wcmd_poll();
-        view_poll_bytes();
+        launch_poll();
+        rcmd_poll();
 
-        if ((bridge_dirty != 0u) && !(CTRL_FLAGS & CTRL_DRAW_SUSPEND)) {
-            bridge_dirty = 0u;
-            draw_bridge_screen();
+        if (launch_pending != 0u) {
+            /* Launch was requested between NMIs (main-loop path).
+               Jump straight to the trampoline; IFF1 is already 0. */
+            __asm
+                di
+                xor a
+                ld (_launch_pending), a
+                ld hl, (_launch_target)
+                jp (hl)
+            __endasm;
         }
     }
 }

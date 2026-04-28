@@ -1,8 +1,13 @@
 #include "zx_monitor.h"
 
 #include "zx_bus.h"
+#include "tap_loader.h"
+#include "z80_loader.h"
+#include "launch_test.h"
+#include "ff.h"
 
 #include <ctype.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -132,6 +137,14 @@ static void ZX_PrintHelp (void) {
     printf("  test [addr]                  - %u-byte self-test in 3000..3FFF (hex addr)\r\n", (unsigned)ZX_TEST_LEN);
     printf("  busdiag                      - probe all ZX memory regions for r/w\r\n");
     printf("  busrwtest <addr> <n>         - write/readback test N times at addr\r\n");
+    printf("  ls [path]                    - list directory on USB drive\r\n");
+    printf("  tapinfo <path>               - parse .tap and list its blocks\r\n");
+    printf("  taprun <path> [start_hex]    - load .tap CODE blocks, release ROMCS, run\r\n");
+    printf("  z80info <path>               - parse .z80 v1 snapshot header\r\n");
+    printf("  z80run-bus <path>            - load .z80 via BUSREQ, resume snapshot\r\n");
+    printf("  z80run-nmi <path>            - load .z80 via NMI mailbox, resume snapshot\r\n");
+    printf("  launchtest <id>              - 1=NMI mailbox, 2=marker trampoline\r\n");
+    printf("  romcs <on|off>               - assert/release cart ROMCS manually\r\n");
 }
 
 static void ZX_CommandViewOff (void) {
@@ -1019,6 +1032,79 @@ static void ZX_CommandRamTest (uint16_t base, uint32_t len) {
     printf("RAMTEST %s\r\n", ok ? "PASS" : "FAIL");
 }
 
+static void ZX_CommandLs (const char *path) {
+    DIR dir;
+    FILINFO fno;
+    FRESULT fr;
+    const char *target = (path != NULL && path[0] != '\0') ? path : "/";
+    int count = 0;
+
+    fr = f_opendir (&dir, target);
+    if (fr != FR_OK) {
+        printf("ls: cannot open '%s' (fr=%d)\r\n", target, (int)fr);
+        return;
+    }
+
+    printf("Directory of %s\r\n", target);
+    while (1) {
+        fr = f_readdir (&dir, &fno);
+        if (fr != FR_OK || fno.fname[0] == '\0') {
+            break;
+        }
+        if (fno.fattrib & AM_DIR) {
+            printf("  <DIR>            %s\r\n", fno.fname);
+        } else {
+            printf("  %10lu     %s\r\n", (unsigned long)fno.fsize, fno.fname);
+        }
+        ++count;
+    }
+    f_closedir (&dir);
+    printf("(%d entries)\r\n", count);
+}
+
+static void ZX_CommandTapInfo (const char *path) {
+    if ((path == NULL) || (path[0] == '\0')) {
+        printf("Usage: tapinfo <path>\r\n");
+        return;
+    }
+    (void)Tap_Info (path);
+}
+
+static void ZX_CommandTapRun (const char *path, const char *start_arg) {
+    uint16_t start = 0u;
+    uint32_t parsed = 0u;
+
+    if ((path == NULL) || (path[0] == '\0')) {
+        printf("Usage: taprun <path> [start_hex]\r\n");
+        return;
+    }
+    if (start_arg != NULL) {
+        if (!ZX_ParseAddressHex (start_arg, &parsed)) {
+            printf("Bad start address (use hex, e.g. 8000)\r\n");
+            return;
+        }
+        start = (uint16_t)parsed;
+    }
+    (void)Tap_LoadAndRun (path, start);
+}
+
+static void ZX_CommandRomcs (const char *arg) {
+    if (arg == NULL) {
+        printf("ROMCS state: %s\r\n",
+               ZX_RomcsIsReleased() ? "RELEASED (Spectrum ROM)" : "ASSERTED (cart ROM)");
+        return;
+    }
+    if (ZX_StrIeq (arg, "off") || ZX_StrIeq (arg, "release")) {
+        ZX_RomcsRelease();
+        printf("ROMCS released — internal Spectrum ROM active\r\n");
+    } else if (ZX_StrIeq (arg, "on") || ZX_StrIeq (arg, "assert")) {
+        ZX_RomcsAssert();
+        printf("ROMCS asserted — cart ROM active\r\n");
+    } else {
+        printf("Usage: romcs <on|off>\r\n");
+    }
+}
+
 static void ZX_ExecuteCommand (char *line) {
     char *cmd = strtok (line, " \t");
     char *a0;
@@ -1289,12 +1375,74 @@ static void ZX_ExecuteCommand (char *line) {
         return;
     }
 
+    if (ZX_StrIeq (cmd, "ls")) {
+        a0 = strtok (NULL, " \t");
+        ZX_CommandLs (a0);
+        return;
+    }
+
+    if (ZX_StrIeq (cmd, "tapinfo")) {
+        a0 = strtok (NULL, " \t");
+        ZX_CommandTapInfo (a0);
+        return;
+    }
+
+    if (ZX_StrIeq (cmd, "taprun")) {
+        a0 = strtok (NULL, " \t");
+        a1 = strtok (NULL, " \t");
+        ZX_CommandTapRun (a0, a1);
+        return;
+    }
+
+    if (ZX_StrIeq (cmd, "z80info")) {
+        a0 = strtok (NULL, " \t");
+        if ((a0 == NULL) || (a0[0] == '\0')) { printf("Usage: z80info <path>\r\n"); return; }
+        (void)Z80_Info (a0);
+        return;
+    }
+
+    if (ZX_StrIeq (cmd, "z80run-bus")) {
+        a0 = strtok (NULL, " \t");
+        if ((a0 == NULL) || (a0[0] == '\0')) { printf("Usage: z80run-bus <path>\r\n"); return; }
+        (void)Z80_LoadAndRun (a0, Z80L_VIA_BUSREQ);
+        return;
+    }
+
+    if (ZX_StrIeq (cmd, "z80run-nmi")) {
+        a0 = strtok (NULL, " \t");
+        if ((a0 == NULL) || (a0[0] == '\0')) { printf("Usage: z80run-nmi <path>\r\n"); return; }
+        (void)Z80_LoadAndRun (a0, Z80L_VIA_NMI);
+        return;
+    }
+
+    if (ZX_StrIeq (cmd, "launchtest")) {
+        int id = 0;
+        a0 = strtok (NULL, " \t");
+        if ((a0 == NULL) || (a0[0] == '\0')) {
+            printf("Usage: launchtest <id>  (1=NMI mailbox, 2=marker tramp)\r\n");
+            return;
+        }
+        id = (int)strtol (a0, NULL, 0);
+        (void)LaunchTest_Run (id);
+        return;
+    }
+
+    if (ZX_StrIeq (cmd, "romcs")) {
+        a0 = strtok (NULL, " \t");
+        ZX_CommandRomcs (a0);
+        return;
+    }
+
     printf("Unknown command: %s\r\n", cmd);
 }
 
 void ZX_Monitor_Init (void) {
     s_monitor_len = 0u;
     memset (s_monitor_line, 0, sizeof (s_monitor_line));
+
+    /* Disable stdout buffering so per-character local echo appears
+       immediately rather than waiting for a newline flush. */
+    setvbuf (stdout, NULL, _IONBF, 0);
 
     printf("ZX monitor ready. BUSREQ/BUSACK memory access enabled.\r\n");
     printf("Clock sync uses GPIOB.13 inverted ZX clock edges.\r\n");
