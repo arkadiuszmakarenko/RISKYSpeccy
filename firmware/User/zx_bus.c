@@ -975,8 +975,12 @@ int ZX_SnapshotEnter (uint16_t tramp_addr, uint16_t alive_addr,
     uint8_t alive = 0u;
     uint32_t waited = 0u;
     const uint32_t poll_period_ms = 5u;
+    int alive_in_cart = 0;
 
     if (state_pointer == NULL) { return 0; }
+
+    alive_in_cart = ((alive_addr >= state_pointer->RamBase) &&
+                     (alive_addr <= state_pointer->RomLast));
 
     /* Reuse the existing zxprog launch mailbox so the cart-ROM NMI handler
        redirects Z80 PC to tramp_addr.  Sequence number is shared with
@@ -991,7 +995,14 @@ int ZX_SnapshotEnter (uint16_t tramp_addr, uint16_t alive_addr,
     while (waited < timeout_ms) {
         Delay_Ms (poll_period_ms);
         waited += poll_period_ms;
-        if (ZX_BusReadBlock (alive_addr, &alive, 1u) && (alive == alive_value)) {
+        if (alive_in_cart) {
+            if (!ZX_CartRamReadBlock (alive_addr, &alive, 1u)) {
+                continue;
+            }
+        } else if (!ZX_BusReadBlock (alive_addr, &alive, 1u)) {
+            continue;
+        }
+        if (alive == alive_value) {
             printf ("snap: trampoline alive after %lums\r\n", (unsigned long)waited);
             return 1;
         }
@@ -1009,6 +1020,7 @@ int ZX_SnapshotEnter (uint16_t tramp_addr, uint16_t alive_addr,
 int ZX_SnapshotCommit (uint16_t handover_addr, uint16_t go_addr,
                        uint8_t go_value, uint32_t wait_ms) {
     uint32_t waited = 0u;
+    int go_in_cart = 0;
 
     s_handover_fired = 0;
     s_handover_addr  = handover_addr;
@@ -1021,14 +1033,25 @@ int ZX_SnapshotCommit (uint16_t handover_addr, uint16_t go_addr,
        the normal cart ISR (RunCartWithRAM) has zero added cost. */
     SetVTFIRQ ((u32)RunCartWithM1Watch, EXTI15_10_IRQn, 0, ENABLE);
 
-    /* Release trampoline spin via BUSREQ-write of go-byte. */
-    if (!ZX_BusAcquire()) {
-        s_handover_armed = 0;
-        SetVTFIRQ ((u32)RunCartWithRAM, EXTI15_10_IRQn, 0, ENABLE);
-        return 0;
+    go_in_cart = ((go_addr >= state_pointer->RamBase) &&
+                  (go_addr <= state_pointer->RomLast));
+
+    /* Release trampoline spin via the appropriate backing store. */
+    if (go_in_cart) {
+        if (!ZX_CartRamWriteBlock (go_addr, &go_value, 1u)) {
+            s_handover_armed = 0;
+            SetVTFIRQ ((u32)RunCartWithRAM, EXTI15_10_IRQn, 0, ENABLE);
+            return 0;
+        }
+    } else {
+        if (!ZX_BusAcquire()) {
+            s_handover_armed = 0;
+            SetVTFIRQ ((u32)RunCartWithRAM, EXTI15_10_IRQn, 0, ENABLE);
+            return 0;
+        }
+        (void)ZX_BusWriteCycle (go_addr, go_value);
+        ZX_BusRelease();
     }
-    (void)ZX_BusWriteCycle (go_addr, go_value);
-    ZX_BusRelease();
 
     /* Wait for ISR to fire on the M1 fetch.  At 3.5 MHz the trampoline
        (~80 T-states from go-read to JP target) finishes in ~30us. */
