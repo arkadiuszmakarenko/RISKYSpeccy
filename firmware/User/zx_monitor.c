@@ -22,8 +22,26 @@
 #define ZX_VIEW_LEN_ADDR    0x302Du
 #define ZX_VIEW_MAX_BYTES   16u
 
+#define ZX_SCREEN_PIXELS_ADDR 0x4000u
+#define ZX_SCREEN_PIXELS_LEN  6144u
+#define ZX_SCREEN_ATTRS_ADDR  0x5800u
+#define ZX_SCREEN_ATTRS_LEN   768u
+
+#define ZX_GFXTEST_FRAMES   5u
+#define ZX_GFXTEST_FRAME_MS 700u
+#define ZX_GFXTEST_NMI_TO   200u
+
+#define ZX_RAMTEST_CHUNK     0x0200u  /* matches ZX_NMI_WCMD_CHUNK in zx_bus.c */
+#define ZX_RAMTEST_NMI_TO    300u
+#define ZX_RAMTEST_DEFAULT_BASE 0xC000u
+#define ZX_RAMTEST_DEFAULT_LEN  0x4000u  /* 16 KB top RAM, uncontended, safe */
+#define ZX_RAMTEST_MAX_ERRORS   8u
+
 static char s_monitor_line[ZX_MONITOR_BUF_SIZE];
 static uint8_t s_monitor_len = 0u;
+
+static uint8_t s_gfx_pixels[ZX_SCREEN_PIXELS_LEN];
+static uint8_t s_gfx_attrs[ZX_SCREEN_ATTRS_LEN];
 static uint8_t s_bridge_seq = 0u;
 static uint8_t s_view_seq = 0u;
 
@@ -106,6 +124,8 @@ static void ZX_PrintHelp (void) {
     printf("  nmidiag                      - probe ZX addr map via NMI vs BUSREQ\r\n");
     printf("  suspend                      - pause ZX screen drawing\r\n");
     printf("  resume                       - resume ZX screen drawing\r\n");
+    printf("  gfxtest                      - animated gfx demo on ZX screen RAM\r\n");
+    printf("  ramtest [addr] [len]         - write/read patterns across ZX RAM (default C000/4000)\r\n");
     printf("  zxview <addr> [len]          - show live ZX RAM bytes on screen\r\n");
     printf("  zxmsg <text>                 - send text to ZX on-screen host bridge\r\n");
     printf("  nmi                          - trigger NMI pulse\r\n");
@@ -693,6 +713,312 @@ static void ZX_CommandBusRwTest (uint16_t address, uint8_t iterations) {
     }
 }
 
+/* Animated graphics test: suspends zxprog's screen drawing, paints a series
+   of full-screen patterns directly into ZX video RAM via NMI writes (which
+   bypass ULA contention), then resumes zxprog so it redraws the bridge UI.
+
+   The pattern generator works in ZX screen-address order: the unusual ZX
+   layout encodes y as bits [12:11]=third, [10:8]=row-within-char,
+   [7:5]=char-row-within-third; x_byte is bits [4:0]. */
+
+static uint8_t ZX_GfxPixelByte (uint8_t frame, uint8_t y, uint8_t x_byte) {
+    switch (frame) {
+        case 0u:
+            /* Vertical 8-pixel stripes */
+            return (uint8_t)((x_byte & 1u) ? 0xFFu : 0x00u);
+        case 1u:
+            /* Horizontal 8-pixel stripes */
+            return (uint8_t)((y & 0x08u) ? 0xFFu : 0x00u);
+        case 2u: {
+            /* 8x8 checkerboard */
+            uint8_t cell = (uint8_t)((x_byte ^ (y >> 3)) & 1u);
+            return cell ? 0xFFu : 0x00u;
+        }
+        case 3u:
+            /* Diagonal lines */
+            return (uint8_t)(0x80u >> ((y + x_byte) & 7u));
+        case 4u:
+        default: {
+            /* Border frame + diagonal cross */
+            uint8_t out = 0x00u;
+            if ((y < 4u) || (y >= 188u)) {
+                out = 0xFFu;
+            } else if (x_byte == 0u) {
+                out = 0x01u;
+            } else if (x_byte == 31u) {
+                out = 0x80u;
+            } else {
+                /* Cross: y == x*6 (approx diag) and y == 192 - x*6 */
+                uint8_t xb6 = (uint8_t)(x_byte * 6u);
+                if ((y == xb6) || (y == (uint8_t)(192u - xb6))) {
+                    out = 0xFFu;
+                }
+            }
+            return out;
+        }
+    }
+}
+
+static void ZX_GfxBuildPixels (uint8_t frame) {
+    uint16_t addr;
+    for (addr = 0u; addr < ZX_SCREEN_PIXELS_LEN; ++addr) {
+        uint8_t y = (uint8_t)(((addr >> 11) & 0x03u) << 6);
+        y |= (uint8_t)(((addr >> 5) & 0x07u) << 3);
+        y |= (uint8_t)((addr >> 8) & 0x07u);
+        uint8_t x_byte = (uint8_t)(addr & 0x1Fu);
+        s_gfx_pixels[addr] = ZX_GfxPixelByte (frame, y, x_byte);
+    }
+}
+
+static void ZX_GfxBuildAttrs (uint8_t frame) {
+    static const uint8_t fg_table[ZX_GFXTEST_FRAMES] = {7u, 6u, 0u, 5u, 3u};
+    static const uint8_t bg_table[ZX_GFXTEST_FRAMES] = {1u, 2u, 7u, 0u, 4u};
+    uint8_t fg = fg_table[frame % ZX_GFXTEST_FRAMES];
+    uint8_t bg = bg_table[frame % ZX_GFXTEST_FRAMES];
+    uint16_t i;
+    for (i = 0u; i < ZX_SCREEN_ATTRS_LEN; ++i) {
+        uint8_t row = (uint8_t)(i >> 5);
+        uint8_t col = (uint8_t)(i & 0x1Fu);
+        uint8_t ink = fg;
+        uint8_t paper = bg;
+        if (((row + col) & 1u) == 0u) {
+            uint8_t t = ink; ink = paper; paper = t;
+        }
+        s_gfx_attrs[i] = (uint8_t)(0x40u | ((paper & 0x07u) << 3) | (ink & 0x07u));
+    }
+}
+
+static void ZX_CommandGfxTest (void) {
+    uint8_t frame;
+
+    printf("GFXTEST: suspending zxprog draw, animating %u frames\r\n",
+           (unsigned)ZX_GFXTEST_FRAMES);
+
+    ZX_CartDrawSuspend();
+    /* Wait for any in-progress draw_bridge_screen() (memset of 0x4000) to finish. */
+    Delay_Ms (50u);
+
+    for (frame = 0u; frame < ZX_GFXTEST_FRAMES; ++frame) {
+        ZX_GfxBuildPixels (frame);
+        ZX_GfxBuildAttrs (frame);
+
+        if (!ZX_NmiWriteBlock (ZX_SCREEN_PIXELS_ADDR, s_gfx_pixels,
+                               ZX_SCREEN_PIXELS_LEN, ZX_GFXTEST_NMI_TO)) {
+            printf("GFXTEST: pixel write timeout (frame %u)\r\n", (unsigned)frame);
+            ZX_CartDrawResume();
+            return;
+        }
+        if (!ZX_NmiWriteBlock (ZX_SCREEN_ATTRS_ADDR, s_gfx_attrs,
+                               ZX_SCREEN_ATTRS_LEN, ZX_GFXTEST_NMI_TO)) {
+            printf("GFXTEST: attr write timeout (frame %u)\r\n", (unsigned)frame);
+            ZX_CartDrawResume();
+            return;
+        }
+
+        printf("GFXTEST: frame %u painted\r\n", (unsigned)frame);
+        Delay_Ms (ZX_GFXTEST_FRAME_MS);
+    }
+
+    /* Bump bridge sequence so zxprog's main loop sets bridge_dirty and
+       redraws its UI as soon as we clear the suspend flag. Existing text/len
+       remain in cart RAM, so the redraw repaints the previous content. */
+    ++s_bridge_seq;
+    (void)ZX_CartRamWriteBlock (ZX_BRIDGE_SEQ_ADDR, &s_bridge_seq, 1u);
+
+    ZX_CartDrawResume();
+    printf("GFXTEST: complete, zxprog resumed\r\n");
+}
+
+/* ---------------- Full RAM walk test ---------------------------------- */
+
+/* Pattern generator. Produces deterministic byte for (pattern, abs_addr).
+   Patterns:
+     0: 0x00       1: 0xFF       2: 0xAA       3: 0x55
+     4: addr_lo    5: ~addr_lo   6: LFSR8 pseudo-random (seed 0xACE1) */
+static uint8_t ZX_RamTestByte (uint8_t pattern, uint16_t addr) {
+    switch (pattern) {
+        case 0u: return 0x00u;
+        case 1u: return 0xFFu;
+        case 2u: return 0xAAu;
+        case 3u: return 0x55u;
+        case 4u: return (uint8_t)(addr & 0xFFu);
+        case 5u: return (uint8_t)~((uint8_t)(addr & 0xFFu));
+        case 6u:
+        default: {
+            /* Fast closed-form pseudo-random mix, deterministic per-address.
+               Avoids per-byte loops that made full-range tests look hung. */
+            uint16_t x = (uint16_t)(addr * 0x9E37u);
+            x ^= (uint16_t)(addr >> 3);
+            x ^= (uint16_t)(x >> 7);
+            x = (uint16_t)(x * 0x85EBu);
+            x ^= (uint16_t)(x >> 4);
+            return (uint8_t)((x ^ 0x5Au) & 0xFFu);
+        }
+    }
+}
+
+static const char *ZX_RamTestPatternName (uint8_t pattern) {
+    switch (pattern) {
+        case 0u: return "0x00";
+        case 1u: return "0xFF";
+        case 2u: return "0xAA";
+        case 3u: return "0x55";
+        case 4u: return "addr_lo";
+        case 5u: return "~addr_lo";
+        case 6u: default: return "mix";
+    }
+}
+
+#define ZX_RAMTEST_NUM_PATTERNS 7u
+
+/* Test a [base..base+len-1] range with all patterns. zxprog draw must already
+   be suspended by caller. Uses s_gfx_pixels as a chunk scratch buffer. */
+static int ZX_RamTestRange (uint16_t base, uint32_t len) {
+    uint8_t pattern;
+    uint8_t total_ok = 1;
+
+    for (pattern = 0u; pattern < ZX_RAMTEST_NUM_PATTERNS; ++pattern) {
+        uint32_t offset;
+        uint32_t errors = 0u;
+        uint8_t shown = 0u;
+
+        printf("  Pattern %u (%s):", (unsigned)pattern,
+               ZX_RamTestPatternName (pattern));
+
+        /* Phase 1: NMI-write the whole range, chunk by chunk. */
+        offset = 0u;
+        while (offset < len) {
+            uint32_t remaining = len - offset;
+            uint16_t chunk = (remaining > ZX_RAMTEST_CHUNK)
+                                 ? (uint16_t)ZX_RAMTEST_CHUNK
+                                 : (uint16_t)remaining;
+            uint16_t i;
+            uint16_t addr;
+
+            for (i = 0u; i < chunk; ++i) {
+                addr = (uint16_t)(base + offset + i);
+                s_gfx_pixels[i] = ZX_RamTestByte (pattern, addr);
+            }
+
+            if (!ZX_NmiWriteBlock ((uint16_t)(base + offset),
+                                   s_gfx_pixels, chunk,
+                                   ZX_RAMTEST_NMI_TO)) {
+                printf(" WRITE TIMEOUT @0x%04X\r\n",
+                       (unsigned)(base + offset));
+                return 0;
+            }
+            offset += chunk;
+        }
+
+        /* Phase 2: BUSREQ-read whole range and compare. */
+        offset = 0u;
+        while (offset < len) {
+            uint32_t remaining = len - offset;
+            uint16_t chunk = (remaining > ZX_RAMTEST_CHUNK)
+                                 ? (uint16_t)ZX_RAMTEST_CHUNK
+                                 : (uint16_t)remaining;
+            uint16_t i;
+            uint16_t addr;
+
+            if (!ZX_BusReadBlock ((uint16_t)(base + offset),
+                                  s_gfx_pixels, chunk)) {
+                printf(" READ FAIL @0x%04X\r\n",
+                       (unsigned)(base + offset));
+                return 0;
+            }
+
+            for (i = 0u; i < chunk; ++i) {
+                addr = (uint16_t)(base + offset + i);
+                uint8_t expected = ZX_RamTestByte (pattern, addr);
+                if (s_gfx_pixels[i] != expected) {
+                    if (shown < ZX_RAMTEST_MAX_ERRORS) {
+                        if (shown == 0u) { printf("\r\n"); }
+                        printf("    @0x%04X exp=%02X got=%02X diff=%02X\r\n",
+                               (unsigned)addr,
+                               (unsigned)expected,
+                               (unsigned)s_gfx_pixels[i],
+                               (unsigned)(expected ^ s_gfx_pixels[i]));
+                        ++shown;
+                    }
+                    ++errors;
+                }
+            }
+
+            offset += chunk;
+        }
+
+        if (errors == 0u) {
+            printf(" OK\r\n");
+        } else {
+            printf("    -> %lu error(s)%s\r\n",
+                   (unsigned long)errors,
+                   (errors > ZX_RAMTEST_MAX_ERRORS) ? " (truncated)" : "");
+            total_ok = 0;
+        }
+    }
+
+    return total_ok;
+}
+
+static void ZX_CommandRamTest (uint16_t base, uint32_t len) {
+    int ok;
+
+    if (len == 0u) {
+        printf("ERR: ramtest length must be > 0\r\n");
+        return;
+    }
+    if ((uint32_t)base < 0x4000u) {
+        printf("ERR: ramtest base must be >= 0x4000 (ZX RAM)\r\n");
+        return;
+    }
+    if ((uint32_t)base + len > 0x10000u) {
+        printf("ERR: ramtest range exceeds 0xFFFF\r\n");
+        return;
+    }
+
+    /* Warn if range overlaps zxprog BSS/stack area (0x8800-0x8AFF). Caller's
+       choice — overwriting will likely crash zxprog and require reset. */
+    if ((base < 0x8B00u) && ((uint32_t)base + len > 0x8800u)) {
+        printf("WARN: range overlaps zxprog BSS/stack 0x8800-0x8AFF — zxprog will crash\r\n");
+    }
+
+    printf("RAMTEST 0x%04X..0x%04X (%lu bytes), %u patterns\r\n",
+           (unsigned)base,
+           (unsigned)(base + len - 1u),
+           (unsigned long)len,
+           (unsigned)ZX_RAMTEST_NUM_PATTERNS);
+
+    ZX_CartDrawSuspend();
+    Delay_Ms (50u);
+
+    ok = ZX_RamTestRange (base, len);
+
+    /* Restore: write 0x00 everywhere we touched so we don't leave junk
+       (especially relevant for screen RAM / system var areas). */
+    {
+        uint32_t offset = 0u;
+        uint16_t i;
+        for (i = 0u; i < ZX_RAMTEST_CHUNK; ++i) { s_gfx_pixels[i] = 0x00u; }
+        while (offset < len) {
+            uint32_t remaining = len - offset;
+            uint16_t chunk = (remaining > ZX_RAMTEST_CHUNK)
+                                 ? (uint16_t)ZX_RAMTEST_CHUNK
+                                 : (uint16_t)remaining;
+            (void)ZX_NmiWriteBlock ((uint16_t)(base + offset),
+                                    s_gfx_pixels, chunk,
+                                    ZX_RAMTEST_NMI_TO);
+            offset += chunk;
+        }
+    }
+
+    /* Force zxprog to repaint its UI on resume. */
+    ++s_bridge_seq;
+    (void)ZX_CartRamWriteBlock (ZX_BRIDGE_SEQ_ADDR, &s_bridge_seq, 1u);
+    ZX_CartDrawResume();
+
+    printf("RAMTEST %s\r\n", ok ? "PASS" : "FAIL");
+}
+
 static void ZX_ExecuteCommand (char *line) {
     char *cmd = strtok (line, " \t");
     char *a0;
@@ -915,6 +1241,35 @@ static void ZX_ExecuteCommand (char *line) {
     if (ZX_StrIeq (cmd, "resume")) {
         ZX_CartDrawResume();
         printf("ZX screen drawing resumed\r\n");
+        return;
+    }
+
+    if (ZX_StrIeq (cmd, "gfxtest")) {
+        ZX_CommandGfxTest();
+        return;
+    }
+
+    if (ZX_StrIeq (cmd, "ramtest")) {
+        uint32_t base = ZX_RAMTEST_DEFAULT_BASE;
+        uint32_t len = ZX_RAMTEST_DEFAULT_LEN;
+        a0 = strtok (NULL, " \t");
+        a1 = strtok (NULL, " \t");
+        if (a0 != NULL) {
+            if (!ZX_ParseAddressHex (a0, &base)) {
+                printf("Usage: ramtest [addr] [len]\r\n");
+                return;
+            }
+        }
+        if (a1 != NULL) {
+            /* Accept length as hex (without 0x), 0x-prefixed hex, or decimal. */
+            if (!ZX_ParseAddressHex (a1, &len)) {
+                if (!ZX_ParseU32 (a1, &len)) {
+                    printf("Usage: ramtest [addr] [len]\r\n");
+                    return;
+                }
+            }
+        }
+        ZX_CommandRamTest ((uint16_t)base, len);
         return;
     }
 
