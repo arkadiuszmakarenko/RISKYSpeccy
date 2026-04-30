@@ -65,8 +65,24 @@ static volatile int s_rom_released = 0;
    the user code's first fetch. */
 static volatile uint16_t s_handover_addr  = 0xFFFFu;
 static volatile uint16_t s_handover_addr_b = 0xFFFFu;
+static volatile uint16_t s_handover_fired_addr = 0xFFFFu;
 static volatile int      s_handover_armed = 0;
 static volatile int      s_handover_fired = 0;
+
+/* Post-handover bus tracer.  After ROMCS is released, the cart edge still
+   sees every Z80 bus cycle (passive observer): address on GPIOE, data on
+   GPIOD, control on GPIOB.  The tracer ISR records up to 128 MREQ-low
+   events into a ring buffer so we can see exactly what the Z80 fetches
+   after handover and figure out where execution actually goes. */
+#define ZX_TRACE_DEPTH 128u
+typedef struct {
+    uint16_t addr;
+    uint8_t  data;
+    uint8_t  ctrl;   /* bit0=M1 bit1=RD bit2=WR (1=high) */
+} ZX_TraceEntry;
+static volatile ZX_TraceEntry s_trace[ZX_TRACE_DEPTH];
+static volatile uint16_t      s_trace_head = 0u;
+static volatile uint8_t       s_trace_full = 0u;
 
 #define ZX_PIN_M1      GPIO_Pin_9
 
@@ -703,11 +719,18 @@ void RunCartWithM1Watch (void) {
     struct ZXCartState *sp = state_pointer;
     uint16_t address = (uint16_t)GPIOE->INDR;
 
-    if (((address == s_handover_addr) || (address == s_handover_addr_b)) &&
-        ((GPIOB->INDR & ZX_PIN_M1) == 0u)) {
+    /* Match on address alone, not M1.  Reasoning: while the trampoline is
+       running, the Z80 only accesses cart RAM (0x3F80..0x3FFF) and a few
+       I/O ports; the cart address bus never visits handover_addr.  The
+       first time we see handover_addr on the bus is the opcode fetch
+       triggered by `JP user_pc` at the end of the trampoline.  Sampling M1
+       synchronously was racing the ~285ns M1-low window vs EXTI latency
+       and we'd miss the only fetch that ever lands on this address. */
+    if ((address == s_handover_addr) || (address == s_handover_addr_b)) {
         GPIO_ResetBits (GPIOB, GPIO_Pin_3);   /* ROMCS LOW immediately */
         s_rom_released = 1;
         s_handover_armed = 0;
+        s_handover_fired_addr = address;
         s_handover_fired = 1;
         EXTI->INTFR = sp->IRQLine;
         return;
@@ -746,7 +769,93 @@ void RunCartWithM1Watch (void) {
     return;
 }
 
+/* Pure-observer ISR.  Triggered on EXTI line 10 (MREQ falling edge).
+   ROMCS is already floated so we don't drive the data bus \u2014 we just
+   sample address/data/control and store one entry per MREQ event.  Stops
+   recording when the buffer is full so the most-interesting first
+   instructions after handover survive even if the trace runs longer. */
+void ZX_BusTraceISR (void) {
+    EXTI->INTFR = EXTI_Line10;
+    if (s_trace_full) {
+        return;
+    }
+    {
+        uint16_t addr = (uint16_t)GPIOE->INDR;
+        uint16_t bport = (uint16_t)GPIOB->INDR;
+        uint8_t data = (uint8_t)(GPIOD->INDR & 0xFFu);
+        uint8_t ctrl = 0u;
+        if (bport & ZX_PIN_M1)   ctrl |= 0x01u;
+        if (bport & GPIO_Pin_5)  ctrl |= 0x02u;   /* RD */
+        if (bport & GPIO_Pin_4)  ctrl |= 0x04u;   /* WR */
+        s_trace[s_trace_head].addr = addr;
+        s_trace[s_trace_head].data = data;
+        s_trace[s_trace_head].ctrl = ctrl;
+        s_trace_head = (uint16_t)(s_trace_head + 1u);
+        if (s_trace_head >= ZX_TRACE_DEPTH) {
+            s_trace_full = 1u;
+        }
+    }
+}
+
 #pragma GCC pop_options
+
+void ZX_BusTraceArm (void) {
+    s_trace_head = 0u;
+    s_trace_full = 0u;
+}
+
+void ZX_BusTraceStop (void) {
+    /* Nothing to do \u2014 sampler is synchronous. */
+}
+
+/* Synchronous bus sampler: polls MREQ falling edges in a tight loop and
+   stores up to ZX_TRACE_DEPTH samples or until cycles_budget loop
+   iterations elapse.  EXTI is unreliable here because the cart edge
+   pin configurations (and NVIC state) get reshuffled around handover;
+   this approach has no setup cost. */
+void ZX_BusTraceSample (uint32_t loop_budget) {
+    uint16_t prev = (uint16_t)(GPIOB->INDR & GPIO_Pin_10);
+    while ((loop_budget != 0u) && !s_trace_full) {
+        uint16_t cur = (uint16_t)(GPIOB->INDR & GPIO_Pin_10);
+        if ((prev != 0u) && (cur == 0u)) {
+            /* MREQ falling edge */
+            uint16_t addr = (uint16_t)GPIOE->INDR;
+            uint16_t bport = (uint16_t)GPIOB->INDR;
+            uint8_t data = (uint8_t)(GPIOD->INDR & 0xFFu);
+            uint8_t ctrl = 0u;
+            if (bport & ZX_PIN_M1)  ctrl |= 0x01u;
+            if (bport & GPIO_Pin_5) ctrl |= 0x02u;   /* RD */
+            if (bport & GPIO_Pin_4) ctrl |= 0x04u;   /* WR */
+            s_trace[s_trace_head].addr = addr;
+            s_trace[s_trace_head].data = data;
+            s_trace[s_trace_head].ctrl = ctrl;
+            s_trace_head = (uint16_t)(s_trace_head + 1u);
+            if (s_trace_head >= ZX_TRACE_DEPTH) {
+                s_trace_full = 1u;
+            }
+        }
+        prev = cur;
+        --loop_budget;
+    }
+}
+
+void ZX_BusTraceDump (void) {
+    uint16_t n = s_trace_full ? ZX_TRACE_DEPTH : s_trace_head;
+    uint16_t i;
+    printf ("z80: bus trace (%u events, %s):\r\n",
+            (unsigned)n, s_trace_full ? "BUFFER FULL" : "partial");
+    for (i = 0u; i < n; ++i) {
+        uint8_t c = s_trace[i].ctrl;
+        printf ("  %3u: %04X = %02X  M1=%u RD=%u WR=%u%s\r\n",
+                (unsigned)i,
+                (unsigned)s_trace[i].addr,
+                (unsigned)s_trace[i].data,
+                (c & 1u) ? 1u : 0u,
+                (c & 2u) ? 1u : 0u,
+                (c & 4u) ? 1u : 0u,
+                ((c & 1u) == 0u) ? "  <- M1 fetch" : "");
+    }
+}
 
 /* ===== ROMCS control + launch sequence ============================== */
 
@@ -1030,6 +1139,7 @@ int ZX_SnapshotCommitDual (uint16_t handover_addr_a,
     int go_in_cart = 0;
 
     s_handover_fired = 0;
+    s_handover_fired_addr = 0xFFFFu;
     s_handover_addr  = handover_addr_a;
     s_handover_addr_b = handover_addr_b;
     /* Memory barrier so the ISR sees both writes in order. */
@@ -1087,6 +1197,10 @@ int ZX_SnapshotCommitDual (uint16_t handover_addr_a,
     s_handover_addr = 0xFFFFu;
     s_handover_addr_b = 0xFFFFu;
     return s_handover_fired;
+}
+
+uint16_t ZX_SnapshotHandoverFiredAddr (void) {
+    return s_handover_fired_addr;
 }
 
 int ZX_SnapshotCommit (uint16_t handover_addr, uint16_t go_addr,

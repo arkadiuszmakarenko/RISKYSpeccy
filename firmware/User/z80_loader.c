@@ -28,14 +28,24 @@
 
 /* ===== ZX-side memory map for the loader ============================ */
 
-#define Z80L_REGBLOCK_ADDR     0x3F80u   /* cart RAM: 28 bytes of state   */
-#define Z80L_REGBLOCK_LEN      28u
+#define Z80L_REGBLOCK_ADDR     0x3F80u   /* cart RAM: 26 bytes of state   */
+#define Z80L_REGBLOCK_LEN      26u
 #define Z80L_TRAMP_ADDR        0x3FA0u   /* cart RAM: trampoline code     */
-#define Z80L_TRAMP_LEN         60u
-#define Z80L_ALIVE_ADDR        0x3FDCu
+#define Z80L_TRAMP_LEN         65u
 #define Z80L_GO_ADDR           0x3FDDu
-#define Z80L_ALIVE_VALUE       0xAAu
 #define Z80L_GO_VALUE          0x55u
+
+/* Diagnostic markers in cart RAM (sp->ram[]).  Z80 writes them via the
+   normal ISR WR-capture path; even if a few WR strobes are missed, by
+   the time the trampoline reaches the spinloop the markers settle.
+   Crucially: cart RAM lives in MCU SRAM, so the MCU can read these
+   markers via sp->ram[] at any time \u2014 BEFORE handover, AFTER handover,
+   even seconds later \u2014 with no BUSREQ stall and no chance of the
+   running game stomping them (these addresses are outside the 48K map). */
+#define Z80L_DBG_ALIVE_ADDR    0x3F7Eu
+#define Z80L_DBG_POSTGO_ADDR   0x3F7Fu
+#define Z80L_DBG_ALIVE         0xAAu
+#define Z80L_DBG_POSTGO        0xBBu
 
 /* zxprog BSS+stack lives at 0xBE00-0xBEFF (minimal NMI-only zxprog).
    NMI-writes into that region would corrupt the running Z80 program;
@@ -352,71 +362,130 @@ static int z80_stream_body (Z80Reader *r, Z80OutState *o, int compressed) {
 
 /* ===== Trampoline =================================================== */
 
-/* Fixed assembled bytes; offsets [37], [51], [56], [58] and [59] are patched
-    per-snapshot. Layout matches the regblock in cart RAM at 0x3F80.
-    The trampoline first clears its cart-RAM go-byte, then restores the saved
-    register image and jumps directly to the real snapshot PC.  M1 handover is
-    armed on that first user fetch, so ZX top RAM stays completely intact. */
+/* Fixed assembled bytes; offsets [36], [50], [59], [61], [62] are patched
+   per-snapshot.  Layout matches the regblock in cart RAM at 0x3F80.
+
+   Restore order — KEY POINT: main AF is restored LAST.  All earlier steps
+   clobber A (LD A,<border>; LD A,(I); LD A,(R)), so the snapshot would
+   otherwise enter user code with A holding the value of R, not h.a.
+
+     17  LD SP,0x3F82      ; skip main AF, start at BC
+     20  POP BC / DE / HL
+     23  EXX
+     24  POP BC' / DE' / HL'
+     27  EXX
+     28  EX AF,AF' ; POP AF (alt) ; EX AF,AF'
+     31  POP IX / POP IY                  (SP now at 0x3F94)
+     35  LD A,<border>; OUT (0xFE),A
+     39  LD A,(0x3F94); LD I,A
+     44  LD A,(0x3F95); LD R,A
+     49  IM x
+     51  LD SP,0x3F80                     ; rewind to main AF
+     54  POP AF                           ; A and F finally correct
+     55  LD SP,(0x3F9A)                   ; user SP
+     59  EI / NOP
+     60  JP <user_pc>
+*/
+/* Compact 47-byte trampoline (Robee Shepherd's microdrive snapshot loader
+   tricks: POP AF for I, packed border+R via POP BC, alt set via EXX,
+   main AF popped LAST so A enters user code uncorrupted).
+
+   READ-ONLY on cart RAM: spins on GO read until MCU pokes 0x55 into
+   sp->ram[GO_ADDR] (direct MCU memory write, no bus).  The trampoline
+   never writes to cart-RAM, eliminating the flaky Z80→cart-RAM WR path.
+
+   Regblock layout at 0x3F80 (popped low->high):
+       +0  BC' / DE' / HL'    (popped to main, then EXX moves to alt)
+       +6  AF'                (POP AF; EX AF,AF')
+       +8  IX / IY            (not banked)
+       +12 I-pair              (POP AF: lo=junk F, hi=I)
+       +14 border + R          (POP BC: lo=C=border, hi=B=R-9 mod 128)
+       +16 main BC / DE / HL
+       +22 main AF             (popped LAST)
+       +24 user SP             (loaded via LD SP,(0x3F98))
+
+   Patch sites: [35] IM byte (46/56/5E), [51] EI/NOP placeholder (the JP
+   below at offsets 51..53), see actual indices in the patch code.
+
+   Diagnostic markers (0x5B00..0x5B01 \u2014 ZX printer buffer, never used by
+   real games):
+       0x5B00 = 0xAA   immediately after DI  (\"trampoline started\")
+       0x5B01 = 0xBB   right after spinloop  (\"GO seen, falling through\")
+   Lets the MCU distinguish: trampoline never ran / stuck in spinloop /
+   ran fully but M1 didn't latch. */
 static const uint8_t Z80L_TRAMPOLINE[Z80L_TRAMP_LEN] = {
-    /* 00 */ 0xF3,                       /* DI                            */
-    /* 01 */ 0xAF,                       /* XOR A                         */
-     /* 02 */ 0x32, 0xDD, 0x3F,           /* LD (0x3FDD), A   ; clear go   */
-    /* 05 */ 0x3E, 0xAA,                 /* LD A, 0xAA                    */
-     /* 07 */ 0x32, 0xDC, 0x3F,           /* LD (0x3FDC), A   ; alive      */
-     /* 10 */ 0x3A, 0xDD, 0x3F,           /* LD A, (0x3FDD)                */
-    /* 13 */ 0xFE, 0x55,                 /* CP 0x55                       */
-    /* 15 */ 0x20, 0xF9,                 /* JR NZ, -7   (back to LD A)    */
-     /* 17 */ 0x31, 0x80, 0x3F,           /* LD SP, 0x3F80                 */
-    /* 20 */ 0xF1,                       /* POP AF       (main)           */
-    /* 21 */ 0xC1,                       /* POP BC       (main)           */
-    /* 22 */ 0xD1,                       /* POP DE       (main)           */
-    /* 23 */ 0xE1,                       /* POP HL       (main)           */
-    /* 24 */ 0xD9,                       /* EXX                           */
-    /* 25 */ 0xC1,                       /* POP BC'                       */
-    /* 26 */ 0xD1,                       /* POP DE'                       */
-    /* 27 */ 0xE1,                       /* POP HL'                       */
-    /* 28 */ 0xD9,                       /* EXX                           */
-    /* 29 */ 0x08,                       /* EX AF, AF'                    */
-    /* 30 */ 0xF1,                       /* POP AF       (alt)            */
-    /* 31 */ 0x08,                       /* EX AF, AF'                    */
-    /* 32 */ 0xDD, 0xE1,                 /* POP IX                        */
-    /* 34 */ 0xFD, 0xE1,                 /* POP IY                        */
-    /* 36 */ 0x3E, 0x00,                 /* LD A, <border>     PATCH @37  */
-    /* 38 */ 0xD3, 0xFE,                 /* OUT (0xFE), A                 */
-    /* 40 */ 0x3A, 0x94, 0x3F,           /* LD A, (0x3F94)  ; I           */
-    /* 43 */ 0xED, 0x47,                 /* LD I, A                       */
-    /* 45 */ 0x3A, 0x95, 0x3F,           /* LD A, (0x3F95)  ; R           */
-    /* 48 */ 0xED, 0x4F,                 /* LD R, A                       */
-    /* 50 */ 0xED, 0x56,                 /* IM 1            PATCH @51     */
-    /* 52 */ 0xED, 0x7B, 0x9A, 0x3F,     /* LD SP, (0x3F9A)               */
-    /* 56 */ 0xFB,                       /* EI              PATCH @56     */
-    /* 57 */ 0xC3, 0x00, 0x00            /* JP <user_pc>     PATCH @58/59 */
+    /*  0 */ 0xF3,                       /* DI                              */
+    /*  1 */ 0x3E, 0xAA,                 /* LD A, 0xAA                      */
+    /*  3 */ 0x06, 0x20,                 /* LD B, 32                        */
+    /*  5 */ 0x32, 0x7E, 0x3F,           /* LD (0x3F7E), A   ; alive (32x) */
+    /*  8 */ 0x10, 0xFB,                 /* DJNZ -5  -> back to LD (nn),A   */
+    /* 10 */ 0x3A, 0xDD, 0x3F,           /* LD A, (0x3FDD)  ; GO byte       */
+    /* 13 */ 0xFE, 0x55,                 /* CP 0x55                         */
+    /* 15 */ 0x20, 0xF9,                 /* JR NZ, -7  (back to LD A,(GO))  */
+    /* 17 */ 0x3E, 0xBB,                 /* LD A, 0xBB                      */
+    /* 19 */ 0x06, 0x20,                 /* LD B, 32                        */
+    /* 21 */ 0x32, 0x7F, 0x3F,           /* LD (0x3F7F), A   ; post (32x)  */
+    /* 24 */ 0x10, 0xFB,                 /* DJNZ -5                         */
+    /* 26 */ 0x31, 0x80, 0x3F,           /* LD SP, 0x3F80  ; regblock       */
+    /* 29 */ 0xC1,                       /* POP BC          ; BC' value     */
+    /* 30 */ 0xD1,                       /* POP DE          ; DE' value     */
+    /* 31 */ 0xE1,                       /* POP HL          ; HL' value     */
+    /* 32 */ 0xD9,                       /* EXX  -> values now in alt set   */
+    /* 33 */ 0xF1,                       /* POP AF          ; AF' value     */
+    /* 34 */ 0x08,                       /* EX AF, AF'                      */
+    /* 35 */ 0xDD, 0xE1,                 /* POP IX                          */
+    /* 37 */ 0xFD, 0xE1,                 /* POP IY                          */
+    /* 39 */ 0xF1,                       /* POP AF          ; A=I, F=junk   */
+    /* 40 */ 0xED, 0x47,                 /* LD I, A                         */
+    /* 42 */ 0xED, 0x56,                 /* IM 1            PATCH @43       */
+    /* 44 */ 0xC1,                       /* POP BC          ; C=border B=R  */
+    /* 45 */ 0x79,                       /* LD A, C                         */
+    /* 46 */ 0x0E, 0xFE,                 /* LD C, 0xFE                      */
+    /* 48 */ 0xED, 0x79,                 /* OUT (C), A      ; border        */
+    /* 50 */ 0x78,                       /* LD A, B                         */
+    /* 51 */ 0xED, 0x4F,                 /* LD R, A         ; R = saved-9   */
+    /* 53 */ 0xC1,                       /* POP BC          ; main BC       */
+    /* 54 */ 0xD1,                       /* POP DE          ; main DE       */
+    /* 55 */ 0xE1,                       /* POP HL          ; main HL       */
+    /* 56 */ 0xF1,                       /* POP AF          ; main AF LAST  */
+    /* 57 */ 0xED, 0x7B, 0x98, 0x3F,     /* LD SP, (0x3F98) ; user SP       */
+    /* 61 */ 0xFB,                       /* EI / NOP        PATCH @61       */
+    /* 62 */ 0xC3, 0x00, 0x00            /* JP user_pc      PATCH @63/64    */
 };
 
-/* Build the 28-byte register block (POP-order pairs) in cart RAM. */
+/* Build the 26-byte regblock matching the trampoline above. */
 static void z80_build_regblock (const Z80Header *h, uint8_t *rb) {
-    /* main AF, BC, DE, HL */
-    rb[ 0] = h->f;       rb[ 1] = h->a;
-    rb[ 2] = (uint8_t)(h->bc & 0xFFu); rb[ 3] = (uint8_t)(h->bc >> 8);
-    rb[ 4] = (uint8_t)(h->de & 0xFFu); rb[ 5] = (uint8_t)(h->de >> 8);
-    rb[ 6] = (uint8_t)(h->hl & 0xFFu); rb[ 7] = (uint8_t)(h->hl >> 8);
-    /* alt BC, DE, HL */
-    rb[ 8] = (uint8_t)(h->bc_alt & 0xFFu); rb[ 9] = (uint8_t)(h->bc_alt >> 8);
-    rb[10] = (uint8_t)(h->de_alt & 0xFFu); rb[11] = (uint8_t)(h->de_alt >> 8);
-    rb[12] = (uint8_t)(h->hl_alt & 0xFFu); rb[13] = (uint8_t)(h->hl_alt >> 8);
-    /* alt AF */
-    rb[14] = h->f_alt;   rb[15] = h->a_alt;
-    /* IX, IY */
-    rb[16] = (uint8_t)(h->ix & 0xFFu); rb[17] = (uint8_t)(h->ix >> 8);
-    rb[18] = (uint8_t)(h->iy & 0xFFu); rb[19] = (uint8_t)(h->iy >> 8);
-    /* I, R */
-    rb[20] = h->i;
-    rb[21] = h->r;
-    /* unused, kept for layout symmetry */
-    rb[22] = 0u; rb[23] = 0u; rb[24] = 0u; rb[25] = 0u;
-    /* user_sp (PC is reached by direct JP, not by stack-pop RET) */
-    rb[26] = (uint8_t)(h->sp & 0xFFu);
-    rb[27] = (uint8_t)(h->sp >> 8);
+    /* +0..5: BC', DE', HL'  (popped into main, then EXX moves to alt) */
+    rb[ 0] = (uint8_t)(h->bc_alt & 0xFFu); rb[ 1] = (uint8_t)(h->bc_alt >> 8);
+    rb[ 2] = (uint8_t)(h->de_alt & 0xFFu); rb[ 3] = (uint8_t)(h->de_alt >> 8);
+    rb[ 4] = (uint8_t)(h->hl_alt & 0xFFu); rb[ 5] = (uint8_t)(h->hl_alt >> 8);
+    /* +6..7: AF' via POP AF; EX AF,AF'  (lo=F', hi=A') */
+    rb[ 6] = h->f_alt;
+    rb[ 7] = h->a_alt;
+    /* +8..11: IX, IY (not banked, popped after EXX into the same regs) */
+    rb[ 8] = (uint8_t)(h->ix & 0xFFu); rb[ 9] = (uint8_t)(h->ix >> 8);
+    rb[10] = (uint8_t)(h->iy & 0xFFu); rb[11] = (uint8_t)(h->iy >> 8);
+    /* +12..13: I via POP AF (lo=junk F, hi=I) */
+    rb[12] = 0u;
+    rb[13] = h->i;
+    /* +14..15: border + R packed via POP BC (lo=C=border, hi=B=R).
+       R is compensated by -9 to account for the M1 cycles between
+       LD R,A (offset 42) and the user PC fetch:
+         POP BC POP DE POP HL POP AF (4) + LD SP,(nn) ED-prefixed (2)
+         + EI (1) + JP (1) + user M1 (1) = 9
+       Bit 7 of R is preserved (LD R,A loads it but only bits 0-6 cycle). */
+    rb[14] = h->border;
+    rb[15] = (uint8_t)(((h->r - 9u) & 0x7Fu) | (h->r & 0x80u));
+    /* +16..21: main BC, DE, HL */
+    rb[16] = (uint8_t)(h->bc & 0xFFu); rb[17] = (uint8_t)(h->bc >> 8);
+    rb[18] = (uint8_t)(h->de & 0xFFu); rb[19] = (uint8_t)(h->de >> 8);
+    rb[20] = (uint8_t)(h->hl & 0xFFu); rb[21] = (uint8_t)(h->hl >> 8);
+    /* +22..23: main AF (popped LAST so A is correct on entry to user code) */
+    rb[22] = h->f;
+    rb[23] = h->a;
+    /* +24..25: user SP (loaded via LD SP,(0x3F98)) */
+    rb[24] = (uint8_t)(h->sp & 0xFFu);
+    rb[25] = (uint8_t)(h->sp >> 8);
 }
 
 static uint8_t z80_im_byte (uint8_t im) {
@@ -425,6 +494,61 @@ static uint8_t z80_im_byte (uint8_t im) {
         case 2u:  return 0x5Eu;   /* IM 2 */
         default:  return 0x56u;   /* IM 1 (also default for unknown) */
     }
+}
+
+/* Inline NMI launch (no alive poll).  Replaces ZX_SnapshotEnter for the
+   .z80 path: programs the cart-ROM launch mailbox, pre-clears the GO byte
+   directly in the cart-RAM model (no Z80 write involved), triggers NMI,
+   and waits a fixed settle interval.  The Z80 enters the trampoline within
+   well under 1ms (NMI vector + zxprog dispatch ~30 T-states), so 10ms is
+   far more than enough for it to be safely sitting in the GO-read spinloop
+   before the caller starts BUSREQ traffic. */
+static int z80_launch_nmi (void) {
+    uint8_t lo = (uint8_t)(Z80L_TRAMP_ADDR & 0xFFu);
+    uint8_t hi = (uint8_t)(Z80L_TRAMP_ADDR >> 8);
+    uint8_t go_clear = (uint8_t)(Z80L_GO_VALUE ^ 0xFFu);  /* anything != 0x55 */
+    uint8_t cur_seq = 0u;
+    uint8_t next_seq = 0u;
+    uint8_t marker_zero[2] = { 0x00u, 0x00u };
+
+    /* Pre-clear GO byte in cart RAM (direct MCU memory write, reliable). */
+    if (!ZX_CartRamWriteBlock (Z80L_GO_ADDR, &go_clear, 1u)) { return 0; }
+    /* Pre-clear diagnostic markers so a missed Z80 write shows as 0x00. */
+    (void)ZX_CartRamWriteBlock (Z80L_DBG_ALIVE_ADDR, marker_zero, 2u);
+
+    /* Program the zxprog launch mailbox at 0x3F10..0x3F12. */
+    if (!ZX_CartRamWriteBlock (0x3F11u, &lo, 1u))      { return 0; }
+    if (!ZX_CartRamWriteBlock (0x3F12u, &hi, 1u))      { return 0; }
+    if (!ZX_CartRamReadBlock  (0x3F10u, &cur_seq, 1u)) { return 0; }
+    next_seq = (uint8_t)(cur_seq + 1u);
+    if (!ZX_CartRamWriteBlock (0x3F10u, &next_seq, 1u)) { return 0; }
+
+    /* Trigger NMI and wait for the trampoline alive marker (0x3F7E=0xAA).
+       Z80 normally enters the trampoline within ~30us.  If the alive
+       marker never appears (NMI race, or zxprog already running game
+       code, etc.) retry the NMI a few times before giving up. */
+    {
+        unsigned attempt;
+        for (attempt = 0u; attempt < 5u; ++attempt) {
+            uint32_t waited;
+            ZX_TriggerNMI ();
+            for (waited = 0u; waited < 50u; ++waited) {
+                uint8_t alive = 0u;
+                Delay_Ms (1u);
+                if (ZX_CartRamReadBlock (Z80L_DBG_ALIVE_ADDR, &alive, 1u)
+                    && (alive == Z80L_DBG_ALIVE)) {
+                    return 1;
+                }
+            }
+            printf ("z80: NMI retry %u (alive marker not seen)\r\n",
+                    attempt + 1u);
+            /* Re-bump seq in case zxprog missed the previous edge. */
+            (void)ZX_CartRamReadBlock  (0x3F10u, &cur_seq, 1u);
+            next_seq = (uint8_t)(cur_seq + 1u);
+            (void)ZX_CartRamWriteBlock (0x3F10u, &next_seq, 1u);
+        }
+    }
+    return 0;
 }
 
 /* ===== Public API ================================================ */
@@ -500,11 +624,10 @@ int Z80_LoadAndRun (const char *path, int transport) {
 
     /* Build trampoline + register block in MCU memory (used in both flows). */
     memcpy (tramp, Z80L_TRAMPOLINE, Z80L_TRAMP_LEN);
-    tramp[37] = h.border;
-    tramp[51] = z80_im_byte (h.im);
-    tramp[56] = (h.iff1 != 0u) ? 0xFBu : 0x00u;   /* EI / NOP */
-    tramp[58] = (uint8_t)(h.pc & 0xFFu);
-    tramp[59] = (uint8_t)(h.pc >> 8);
+    tramp[43] = z80_im_byte (h.im);                /* IM x  (second byte) */
+    tramp[61] = (h.iff1 != 0u) ? 0xFBu : 0x00u;    /* EI / NOP            */
+    tramp[63] = (uint8_t)(h.pc & 0xFFu);            /* JP user_pc lo       */
+    tramp[64] = (uint8_t)(h.pc >> 8);               /* JP user_pc hi       */
 
     /* If interrupts are enabled at resume and IM1 is active, the first M1
        after EI+JP may be the interrupt vector fetch at 0x0038 (before user
@@ -533,8 +656,8 @@ int Z80_LoadAndRun (const char *path, int transport) {
             return Z80L_ERR_LOAD;
         }
 
-        if (!ZX_SnapshotEnter (Z80L_TRAMP_ADDR, Z80L_ALIVE_ADDR,
-                               Z80L_ALIVE_VALUE, 1000u)) {
+        if (!z80_launch_nmi ()) {
+            printf ("z80: NMI launch failed (mailbox)\r\n");
             f_close (&fp);
             return Z80L_ERR_LAUNCH;
         }
@@ -582,25 +705,57 @@ int Z80_LoadAndRun (const char *path, int transport) {
             return Z80L_ERR_LOAD;
         }
 
-        /* Quick ground-truth verify from cart RAM. */
+        /* Full readback verify: the trampoline image MUST match byte-for-byte
+           or we'll execute corrupt opcodes and either hang or jump to garbage
+           that may happen to look like running game code with junk regs. */
         {
-            uint8_t v[6];
-            uint8_t tmp[4];
-            memset (v, 0, sizeof (v));
-            if (ZX_CartRamReadBlock ((uint16_t)(Z80L_REGBLOCK_ADDR + 26u), tmp, 2u)) {
-                v[0] = tmp[0]; v[1] = tmp[1];
+            uint8_t rb_back[Z80L_REGBLOCK_LEN];
+            uint8_t tr_back[Z80L_TRAMP_LEN];
+            int ok_rb = ZX_CartRamReadBlock (Z80L_REGBLOCK_ADDR, rb_back,
+                                             Z80L_REGBLOCK_LEN);
+            int ok_tr = ZX_CartRamReadBlock (Z80L_TRAMP_ADDR, tr_back,
+                                             Z80L_TRAMP_LEN);
+            int bad = 0;
+            unsigned i;
+            if (!ok_rb || !ok_tr) {
+                printf ("z80: cart readback failed (rb=%d tr=%d)\r\n",
+                        ok_rb, ok_tr);
+                return Z80L_ERR_LOAD;
             }
-            if (ZX_CartRamReadBlock ((uint16_t)(Z80L_TRAMP_ADDR + 56u), tmp, 4u)) {
-                v[2] = tmp[0]; v[3] = tmp[1]; v[4] = tmp[2]; v[5] = tmp[3];
+            for (i = 0u; i < Z80L_REGBLOCK_LEN; ++i) {
+                if (rb_back[i] != regblock[i]) {
+                    printf ("z80: regblock mismatch @+%u: got %02X want %02X\r\n",
+                            i, rb_back[i], regblock[i]);
+                    if (++bad >= 8) break;
+                }
             }
-            printf ("z80: cart verify SP=%02X %02X JP=%02X %02X %02X %02X (want %02X %02X %02X %02X %02X %02X)\r\n",
-                    v[0], v[1], v[2], v[3], v[4], v[5],
-                    regblock[26], regblock[27], tramp[56], tramp[57], tramp[58], tramp[59]);
+            for (i = 0u; i < Z80L_TRAMP_LEN; ++i) {
+                if (tr_back[i] != tramp[i]) {
+                    printf ("z80: tramp mismatch @+%u: got %02X want %02X\r\n",
+                            i, tr_back[i], tramp[i]);
+                    if (++bad >= 8) break;
+                }
+            }
+            if (bad) {
+                printf ("z80: cart verify FAILED (%d mismatches), aborting\r\n",
+                        bad);
+                return Z80L_ERR_LOAD;
+            }
+            printf ("z80: cart verify OK (regblock %u + tramp %u bytes)\r\n",
+                    (unsigned)Z80L_REGBLOCK_LEN, (unsigned)Z80L_TRAMP_LEN);
         }
 
-        if (!ZX_SnapshotEnter (Z80L_TRAMP_ADDR, Z80L_ALIVE_ADDR,
-                               Z80L_ALIVE_VALUE, 1000u)) {
+        if (!z80_launch_nmi ()) {
+            printf ("z80: NMI launch failed (mailbox)\r\n");
             return Z80L_ERR_LAUNCH;
+        }
+
+        {
+            uint8_t mk[2] = {0xFFu, 0xFFu};
+            (void)ZX_CartRamReadBlock (Z80L_DBG_ALIVE_ADDR, mk, 2u);
+            printf ("z80: post-launch markers @3F7E=%02X @3F7F=%02X "
+                    "(want AA + 00 \u2014 trampoline alive, in spinloop)\r\n",
+                    mk[0], mk[1]);
         }
 
         /* Flush deferred guard bytes via BUSREQ now that zxprog is gone.
@@ -628,12 +783,63 @@ int Z80_LoadAndRun (const char *path, int transport) {
                 (unsigned)handover_addr, (unsigned)h.pc);
     }
 
+    /* Pre-launch sanity dump of user-stack and user-PC area (ZX RAM only:
+       PC < 0x4000 is in ROM and irrelevant).  Helps spot body-load
+       corruption \u2014 if these bytes are obviously wrong, the snapshot
+       data didn't reach ZX RAM. */
+    {
+        uint8_t buf[16];
+        unsigned i;
+        if (ZX_BusReadBlock (h.sp, buf, 16u)) {
+            printf ("z80: stack@%04X:", (unsigned)h.sp);
+            for (i = 0u; i < 16u; ++i) printf (" %02X", buf[i]);
+            printf ("\r\n");
+        }
+        if ((h.pc >= 0x4000u) && ZX_BusReadBlock (h.pc, buf, 16u)) {
+            printf ("z80: code@%04X:", (unsigned)h.pc);
+            for (i = 0u; i < 16u; ++i) printf (" %02X", buf[i]);
+            printf ("\r\n");
+        }
+        printf ("z80: regs A=%02X F=%02X BC=%04X DE=%04X HL=%04X "
+                "IX=%04X IY=%04X I=%02X R=%02X\r\n",
+                h.a, h.f, h.bc, h.de, h.hl, h.ix, h.iy, h.i, h.r);
+    }
+
     if (!ZX_SnapshotCommitDual (handover_addr, h.pc,
                                 Z80L_GO_ADDR, Z80L_GO_VALUE, 200u)) {
-        printf ("z80: snapshot commit failed (handover did not fire)\r\n");
+        /* Markers live in cart RAM (sp->ram[]) \u2014 readable any time, no
+           BUSREQ needed.  Z80 stored them via the normal ISR WR-capture
+           path; if a write was missed they stay 0x00 (we pre-cleared). */
+        uint8_t mark[2] = {0xFFu, 0xFFu};
+        (void)ZX_CartRamReadBlock (Z80L_DBG_ALIVE_ADDR, mark, 2u);
+        printf ("z80: snapshot commit failed (handover did not fire); "
+                "markers @3F7E=%02X @3F7F=%02X "
+                "(want AA + BB; AA only=stuck in spinloop; "
+                "00=trampoline never ran / WR missed)\r\n",
+                mark[0], mark[1]);
         return Z80L_ERR_LAUNCH;
     }
 
+    {
+        uint8_t mark[2] = {0xFFu, 0xFFu};
+        (void)ZX_CartRamReadBlock (Z80L_DBG_ALIVE_ADDR, mark, 2u);
+        printf ("z80: handover fired @%04X (armed %04X/%04X), "
+                "markers @3F7E=%02X @3F7F=%02X\r\n",
+                (unsigned)ZX_SnapshotHandoverFiredAddr (),
+                (unsigned)handover_addr, (unsigned)h.pc,
+                mark[0], mark[1]);
+    }
+
+    /* Capture ~5ms of post-handover Z80 bus activity.  ROMCS is floated,
+       cart edge is purely passive; tracer ISR just samples address/data/
+       control on each MREQ falling edge.  Buffer is 128 events deep \u2014
+       fills in ~30us of real Z80 execution, so we get the very first
+       opcode fetches after handover.  This shows whether the Z80 actually
+       fetches from h.pc, follows expected control flow, or wanders. */
+    ZX_BusTraceArm ();
+    ZX_BusTraceSample (200000u);   /* tight poll, ~few ms wall time */
+    ZX_BusTraceStop ();
+    ZX_BusTraceDump ();
     printf ("z80: snapshot resumed at PC=%04X. Reset device to return.\r\n",
             (unsigned)h.pc);
     return Z80L_OK;

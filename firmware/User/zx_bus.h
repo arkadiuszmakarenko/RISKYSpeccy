@@ -61,6 +61,21 @@ int  ZX_SnapshotCommitDual (uint16_t handover_addr_a,
                             uint8_t go_value,
                             uint32_t wait_ms);
 
+/* After SnapshotCommit*, returns the M1 address that actually triggered the
+   ROMCS drop (0xFFFF if handover never fired). */
+uint16_t ZX_SnapshotHandoverFiredAddr (void);
+
+/* Post-handover passive bus tracer.  ROMCS is floated so the cart edge
+   sees every Z80 cycle without driving anything.  Captures up to 128
+   MREQ-low events into a ring buffer.  Use sequence:
+       ZX_BusTraceArm();   Delay_Ms(N);   ZX_BusTraceStop();
+       ZX_BusTraceDump();
+   Reads address bus (GPIOE), data bus (GPIOD), M1/RD/WR (GPIOB). */
+void ZX_BusTraceArm    (void);
+void ZX_BusTraceSample (uint32_t loop_budget);
+void ZX_BusTraceStop   (void);
+void ZX_BusTraceDump   (void);
+
 /* Exposed so callers can size their fill buffers to match one NMI chunk */
 #define ZX_NMI_WCMD_CHUNK_EXPOSED 0x0200u
 
