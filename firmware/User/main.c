@@ -51,6 +51,7 @@ int main (void) {
     GPIO_Config();
     USB_Initialization();
     Init_Cart();
+    ZX_Z80Reset();
 
     /* Mount USB MSC filesystem (lazy: actual init runs on first f_open). */
     {
