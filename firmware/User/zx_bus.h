@@ -26,31 +26,24 @@ void ZX_CartDrawResume (void);
    mode. ZX_RomcsIsReleased() reports the current state. */
 void ZX_RomcsRelease (void);
 void ZX_RomcsAssert  (void);
+void ZX_Z80Reset     (void);  /* pulse /RESET LOW then wait 200ms for zxprog init */
 int  ZX_RomcsIsReleased (void);
 
-/* Hand control to a Z80 program at start_addr.  Installs a small trampoline
-   in upper ZX RAM (0xFFC0..) that spin-waits for CH32 to release ROMCS, then
-   triggers an NMI with the launch mailbox set so the cart-ROM NMI handler
-   redirects Z80 PC into the trampoline.  Once the trampoline is alive (via
-   poll over BUSREQ) CH32 sets the release flag and clears ROMCS.  Returns 1
-   on success, 0 on timeout. */
+/* Hand control to a Z80 program at start_addr using the cart-RAM launcher.
+   Builds a clean Spectrum register state (regblock at 0x3F80) and launcher
+   tail (at 0x3FF0), then triggers LAUNCH_TRIGGER so zxprog's main loop calls
+   zx_launcher, which restores registers and executes the tail.
+   Arms M1 watch at start_addr (and 0x0038 for IM1) via ZX_SnapshotCommitDual.
+   Returns 1 on success, 0 on timeout. */
 int  ZX_LaunchZ80 (uint16_t start_addr);
 
-/* Two-phase launch (used by the TAP loader so it can BUSREQ-write data into
-   zxprog's BSS/stack region after zxprog has been replaced by the trampoline).
-   Call ZX_LaunchPrepare first; on success the Z80 is in the spin-loop at
-   0xFFC0 waiting for the go-flag.  Do whatever extra BUSREQ writes are
-   needed, then call ZX_LaunchCommit() to release ROMCS and let the Z80 jump
-   to the user program. */
-int  ZX_LaunchPrepare (uint16_t start_addr);
-int  ZX_LaunchCommit  (void);
-
-/* Snapshot launch primitives (.z80 loader).
-   ZX_SnapshotEnter installs a launch-mailbox sequence that makes the cart-ROM
-   NMI handler redirect Z80 PC to tramp_addr; polls alive_addr for alive_value.
-   ZX_SnapshotCommit arms M1 handover at handover_addr, BUSREQ-writes the
-   go-byte to release the trampoline spin, waits for the ISR to drop ROMCS,
-   then performs a full ZX_RomcsRelease() tristate. */
+/* Snapshot launch primitives.
+   ZX_SnapshotEnter redirects Z80 PC to tramp_addr (trampoline already written
+   to ZX RAM by caller) using the cart-RAM launcher; polls alive_addr for
+   alive_value.  Uses LAUNCH_TRIGGER mechanism — no NMI mailbox seq/target.
+   ZX_SnapshotCommit arms M1 handover at handover_addr, writes the go-byte to
+   release the trampoline spin, waits for the ISR to drop ROMCS, then performs
+   a full ZX_RomcsRelease() tristate. */
 int  ZX_SnapshotEnter  (uint16_t tramp_addr, uint16_t alive_addr,
                         uint8_t alive_value, uint32_t timeout_ms);
 int  ZX_SnapshotCommit (uint16_t handover_addr, uint16_t go_addr,

@@ -1,26 +1,20 @@
-Z88DK    ?= /home/makaron/z88dk
-ZCC       = $(Z88DK)/bin/zcc
-Z80ASM    = $(Z88DK)/bin/z88dk-z80asm
-PYTHON    = python3
+SDCC     = sdcc
+# -mz80              : Z80 target
+# --no-std-crt0      : suppress z88dk/SDCC default CRT0; crt0.s provides ours
+# --code-loc 0x0069  : _CODE section after the 0x0000..0x0068 vector area
+# --data-loc 0x3F00  : BSS/DATA in cart RAM (wcmd_last_seq at 0x3F00, etc.)
+# --no-xinit-opt     : do not emit XINIT section (no initialised data to copy)
+SDCFLAGS = -mz80 --no-std-crt0 --code-loc 0x0069 --data-loc 0x3F00 \
+           --no-xinit-opt
 
-export Z88DK
-export ZCCCFG := $(Z88DK)/lib/config
-export PATH := $(Z88DK)/bin:$(PATH)
+OBJCOPY  = objcopy
+PYTHON   = python3
 
 TARGET   = zxprog
 ROM_SIZE = 16384
-MONITOR_START ?= 0x3000
 
 OUT_ZX_C = ../User/zx_image.c
 BIN2ZX   = ./bin2zximage.py
-PATCH_NMI = ./patch_nmi_vector.py
-
-# Compile+link: startup=2 = ROM mode (no ROM calls, code at 0x0000, BSS in RAM)
-CFLAGS = +zx -startup=2 -clib=default -SO3 \
-         -subtype=bin \
-		 -m \
-		 -DMONITOR_START=$(MONITOR_START) \
-         -L$(Z88DK)/libsrc
 
 .PHONY: all clean
 
@@ -29,9 +23,24 @@ all: $(OUT_ZX_C)
 $(OUT_ZX_C): $(TARGET).bin
 	$(PYTHON) $(BIN2ZX) $< $@
 
-$(TARGET).bin: zxprog.c
-	$(ZCC) $(CFLAGS) -o $@ zxprog.c
-	$(PYTHON) $(PATCH_NMI) $@ $(TARGET).map nmi_irq_wrapper
+# Convert Intel HEX -> flat binary, padding to 16 KiB with 0xFF
+$(TARGET).bin: $(TARGET).ihx
+	$(OBJCOPY) -I ihex -O binary --gap-fill=0xFF \
+	    --pad-to=$(ROM_SIZE) $< $@
+
+# Compile + link:
+#   Step 1: assemble crt0.s -> crt0.rel using sdasz80
+#   Step 2: compile zxprog.c and link with crt0.rel -> zxprog.ihx
+# crt0.rel must come first so its _CODE functions (startup, nmi_wrapper,
+# zx_launcher) land at the start of the 0x0069 code window.
+crt0.rel: crt0.s
+	sdasz80 -l -o $@ $<
+
+$(TARGET).ihx: crt0.rel zxprog.c zx.h
+	$(SDCC) $(SDCFLAGS) crt0.rel zxprog.c -o $@
 
 clean:
-	rm -f $(TARGET).bin $(TARGET).map $(TARGET) $(TARGET).tap *.o *.opt
+	rm -f $(TARGET).bin $(TARGET).ihx $(TARGET).map $(TARGET).lk \
+	      $(TARGET).noi $(TARGET).sym $(TARGET).lst \
+	      crt0.rel crt0.sym crt0.lst crt0.asm \
+	      zxprog.rel zxprog.sym zxprog.lst zxprog.asm

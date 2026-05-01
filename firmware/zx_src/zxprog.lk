@@ -1,0 +1,11 @@
+-mjwx
+-i zxprog.ihx
+-b _CODE = 0x0069
+-b _DATA = 0x3f00
+-k /usr/bin/../share/sdcc/lib/z80
+-k /usr/share/sdcc/lib/z80
+-l z80
+zxprog.rel
+crt0.rel
+
+-e

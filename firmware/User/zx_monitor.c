@@ -1401,17 +1401,10 @@ static void ZX_ExecuteCommand (char *line) {
         return;
     }
 
-    if (ZX_StrIeq (cmd, "z80run-bus")) {
+    if (ZX_StrIeq (cmd, "z80run-bus") || ZX_StrIeq (cmd, "z80run-nmi") || ZX_StrIeq (cmd, "z80run")) {
         a0 = strtok (NULL, " \t");
-        if ((a0 == NULL) || (a0[0] == '\0')) { printf("Usage: z80run-bus <path>\r\n"); return; }
-        (void)Z80_LoadAndRun (a0, Z80L_VIA_BUSREQ);
-        return;
-    }
-
-    if (ZX_StrIeq (cmd, "z80run-nmi")) {
-        a0 = strtok (NULL, " \t");
-        if ((a0 == NULL) || (a0[0] == '\0')) { printf("Usage: z80run-nmi <path>\r\n"); return; }
-        (void)Z80_LoadAndRun (a0, Z80L_VIA_NMI);
+        if ((a0 == NULL) || (a0[0] == '\0')) { printf("Usage: z80run <path>\r\n"); return; }
+        (void)Z80_LoadAndRun (a0);
         return;
     }
 

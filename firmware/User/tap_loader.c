@@ -12,77 +12,12 @@
 #define TAP_NMI_TIMEOUT   400u
 #define TAP_HEADER_LEN    19u
 
-/* zxprog's BSS+stack live at 0xBE00-0xBEFF (minimal NMI-only zxprog).
-   NMI-writing into that region corrupts the Z80 program that's actually
-   performing the writes, so any bytes destined for it are buffered in CH32
-   RAM and BUSREQ-flushed AFTER the launch trampoline has taken over but
-   BEFORE ROMCS is released. */
-#define TAP_GUARD_LO       0xBE00u
-#define TAP_GUARD_HI       0xBF00u  /* exclusive */
-#define TAP_GUARD_SIZE     (TAP_GUARD_HI - TAP_GUARD_LO)
+/* zxprog BSS+stack live in cart RAM (0x3000..0x3FFF); no guard region
+   needed — NMI writes to ZX RAM 0x4000..0xFFFF cannot corrupt cart RAM. */
 
-static uint8_t  s_guard_buf[TAP_GUARD_SIZE];
-static uint16_t s_guard_lo_used;   /* lowest absolute addr touched */
-static uint16_t s_guard_hi_used;   /* one past highest absolute addr touched */
-
-static void tap_guard_reset (void) {
-    s_guard_lo_used = TAP_GUARD_HI;
-    s_guard_hi_used = TAP_GUARD_LO;
-    /* don't bother clearing s_guard_buf — only [lo_used,hi_used) is read */
-}
-
-static void tap_guard_capture (uint16_t addr, const uint8_t *src, uint16_t len) {
-    uint16_t off = (uint16_t)(addr - TAP_GUARD_LO);
-    uint16_t i;
-    for (i = 0u; i < len; ++i) {
-        s_guard_buf[off + i] = src[i];
-    }
-    if (addr < s_guard_lo_used) { s_guard_lo_used = addr; }
-    if ((uint32_t)addr + len > s_guard_hi_used) {
-        s_guard_hi_used = (uint16_t)((uint32_t)addr + len);
-    }
-}
-
-/* Write [addr..addr+len) to ZX RAM, routing any guard-region bytes into the
-   deferred buffer and NMI-writing the rest. */
+/* Write [addr..addr+len) to ZX RAM via NMI. */
 static int tap_write_chunk (uint16_t addr, const uint8_t *buf, uint16_t len) {
-    uint32_t end = (uint32_t)addr + len;
-
-    /* Fully outside guard region — straight NMI. */
-    if ((end <= TAP_GUARD_LO) || (addr >= TAP_GUARD_HI)) {
-        return ZX_NmiWriteBlock (addr, buf, len, TAP_NMI_TIMEOUT);
-    }
-
-    /* Pre-guard portion (NMI). */
-    if (addr < TAP_GUARD_LO) {
-        uint16_t pre = (uint16_t)(TAP_GUARD_LO - addr);
-        if (!ZX_NmiWriteBlock (addr, buf, pre, TAP_NMI_TIMEOUT)) {
-            return 0;
-        }
-        addr = TAP_GUARD_LO;
-        buf += pre;
-        len = (uint16_t)(len - pre);
-        end = (uint32_t)addr + len;
-    }
-
-    /* Guard portion (deferred). */
-    {
-        uint16_t in_guard = (end > TAP_GUARD_HI)
-                                ? (uint16_t)(TAP_GUARD_HI - addr)
-                                : len;
-        tap_guard_capture (addr, buf, in_guard);
-        addr = (uint16_t)(addr + in_guard);
-        buf += in_guard;
-        len = (uint16_t)(len - in_guard);
-    }
-
-    /* Post-guard portion (NMI). */
-    if (len > 0u) {
-        if (!ZX_NmiWriteBlock (addr, buf, len, TAP_NMI_TIMEOUT)) {
-            return 0;
-        }
-    }
-    return 1;
+    return ZX_NmiWriteBlock (addr, buf, len, TAP_NMI_TIMEOUT);
 }
 
 /* Returns 1 on full read, 0 on short read / error, sets *eof on clean EOF */
@@ -152,9 +87,7 @@ static int tap_process (const char *path, int load,
         return TAP_ERR_OPEN;
     }
 
-    if (load) {
-        tap_guard_reset();
-    }
+    (void)load;  /* used below for write decisions */
 
     while (1) {
         /* 16-bit length prefix */
@@ -314,37 +247,14 @@ int Tap_LoadAndRun (const char *path, uint16_t start_addr) {
 
     printf ("tap: %d code block(s), launching @ 0x%04X\r\n", blocks, (unsigned)start_addr);
 
-    /* Phase 1: install trampoline, redirect Z80 PC, wait for trampoline alive. */
-    if (!ZX_LaunchPrepare (start_addr)) {
-        printf ("tap: launch prepare failed (trampoline did not come alive)\r\n");
-        ZX_RomcsAssert();
+    /* Restore a clean Spectrum state and jump to start_addr via the
+       cart-RAM launcher (regblock + tail staged by ZX_LaunchZ80). */
+    if (!ZX_LaunchZ80 (start_addr)) {
+        printf ("tap: ZX_LaunchZ80 failed\r\n");
         return TAP_ERR_NMI_WRITE;
     }
 
-    /* Phase 2: Z80 is now in the trampoline spin-loop, zxprog is gone — safe to
-       BUSREQ-write the deferred bytes that landed in zxprog's BSS region. */
-    if (s_guard_lo_used < s_guard_hi_used) {
-        uint16_t flush_len = (uint16_t)(s_guard_hi_used - s_guard_lo_used);
-        printf ("tap: flushing %u deferred byte(s) @0x%04X..0x%04X\r\n",
-                (unsigned)flush_len,
-                (unsigned)s_guard_lo_used,
-                (unsigned)(s_guard_hi_used - 1u));
-        if (!ZX_BusWriteBlock (s_guard_lo_used,
-                               &s_guard_buf[s_guard_lo_used - TAP_GUARD_LO],
-                               flush_len)) {
-            printf ("tap: deferred BUSREQ write failed\r\n");
-            ZX_RomcsAssert();
-            return TAP_ERR_NMI_WRITE;
-        }
-    }
-
-    /* Phase 3: write go-flag, drop ROMCS, release bus. */
-    if (!ZX_LaunchCommit()) {
-        printf ("tap: launch commit failed\r\n");
-        ZX_RomcsAssert();
-        return TAP_ERR_NMI_WRITE;
-    }
-
-    printf ("tap: ROMCS released, Z80 running game. Reset device to return.\r\n");
+    printf ("tap: ROMCS released, Z80 running @ 0x%04X. Reset device to return.\r\n",
+            (unsigned)start_addr);
     return TAP_OK;
 }
