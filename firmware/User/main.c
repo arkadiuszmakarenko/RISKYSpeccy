@@ -34,7 +34,7 @@ static void Handle_ResetButtonPA7 (void) {
                 press_armed = 0u;
                 printf("PA7 reset button pressed: resetting ZX + cart\r\n");
                 ZX_RomcsAssert();
-                ZX_Z80Reset();
+              //  ZX_Z80Reset();
                 NVIC_SystemReset();
             }
         }
@@ -63,6 +63,7 @@ int main (void) {
     }
 
     ZX_Monitor_Init();
+    ZX_Monitor_AutoStartZ80Select();
 
     printf("Hello from RISKY ZX Spectrum firmware!\n");
 

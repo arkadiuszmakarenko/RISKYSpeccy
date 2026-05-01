@@ -1198,6 +1198,7 @@ int ZX_SnapshotCommitDual (uint16_t handover_addr_a,
     }
 
     /* Full tristate of all cart-edge signals (same as `romcs off`). */
+    Delay_Us(200);
     ZX_RomcsRelease();
 
     s_handover_addr = 0xFFFFu;
