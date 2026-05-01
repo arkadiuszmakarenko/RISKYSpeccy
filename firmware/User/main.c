@@ -10,6 +10,39 @@
 
 static FATFS s_fatfs;
 
+static void Handle_ResetButtonPA7 (void) {
+    static uint8_t initialized = 0u;
+    static uint8_t idle_level = 1u;
+    static uint8_t press_armed = 1u;
+    uint8_t level = ((GPIOA->INDR & GPIO_Pin_7) != 0u) ? 1u : 0u;
+
+    if (initialized == 0u) {
+        /* Capture the physical idle level once so wiring can be active-high or active-low. */
+        Delay_Ms (20u);
+        idle_level = ((GPIOA->INDR & GPIO_Pin_7) != 0u) ? 1u : 0u;
+        initialized = 1u;
+        press_armed = 1u;
+        return;
+    }
+
+    if (level != idle_level) {
+        if (press_armed != 0u) {
+            /* Debounce edge away from idle before acting. */
+            Delay_Ms (20u);
+            level = ((GPIOA->INDR & GPIO_Pin_7) != 0u) ? 1u : 0u;
+            if (level != idle_level) {
+                press_armed = 0u;
+                printf("PA7 reset button pressed: resetting ZX + cart\r\n");
+                ZX_RomcsAssert();
+                ZX_Z80Reset();
+                NVIC_SystemReset();
+            }
+        }
+    } else {
+        press_armed = 1u;
+    }
+}
+
 int main (void) {
     NVIC_PriorityGroupConfig (NVIC_PriorityGroup_2);
     SystemCoreClockUpdate();
@@ -33,6 +66,7 @@ int main (void) {
     printf("Hello from RISKY ZX Spectrum firmware!\n");
 
     while (1) {
+        Handle_ResetButtonPA7();
         ZX_Monitor_Poll();
     }
 }

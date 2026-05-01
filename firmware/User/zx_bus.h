@@ -26,7 +26,7 @@ void ZX_CartDrawResume (void);
    mode. ZX_RomcsIsReleased() reports the current state. */
 void ZX_RomcsRelease (void);
 void ZX_RomcsAssert  (void);
-void ZX_Z80Reset     (void);  /* pulse /RESET LOW then wait 200ms for zxprog init */
+void ZX_Z80Reset     (void);  /* pulse /RESET LOW then wait 1200ms for zxprog init */
 int  ZX_RomcsIsReleased (void);
 
 /* Hand control to a Z80 program at start_addr using the cart-RAM launcher.

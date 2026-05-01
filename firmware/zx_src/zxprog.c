@@ -42,6 +42,10 @@
 #define WCMD_DATA_ADDR   0x3034u
 #define WCMD_MAX_DATA    0x0200u    /* 512 bytes max per WCMD chunk */
 
+/* ZX RAM region to clear at startup (48K: 0x4000..0xFFFF) */
+#define ZX_RAM_BASE_ADDR 0x4000u
+#define ZX_RAM_SIZE      0xC000u
+
 /* RCMD mailbox */
 #define RCMD_SEQ_ADDR    0x3F20u
 #define RCMD_DONE_ADDR   0x3F21u
@@ -85,6 +89,24 @@ static void zcopy(unsigned char *dst, const unsigned char *src, unsigned int len
     while (len--) {
         *dst++ = *src++;
     }
+}
+
+/* ---- byte-fill helper ---- */
+static void zfill(unsigned char *dst, unsigned char value, unsigned int len)
+{
+    while (len--) {
+        *dst++ = value;
+    }
+}
+
+/* ---- startup screen/RAM clear ---- */
+static void zx_startup_clear(void)
+{
+    /* Clear full 48K Spectrum RAM so every reset starts from a known state. */
+    zfill((unsigned char *)ZX_RAM_BASE_ADDR, 0x00u, ZX_RAM_SIZE);
+
+    /* Force blank white paper across the visible screen. */
+    zfill((unsigned char *)ATTR_BASE, ATTR(0, WHITE, BLACK), ATTR_SIZE);
 }
 
 /* ---- WCMD poll ---- */
@@ -144,6 +166,8 @@ void nmi_handler_c(void)
    Border is already CYAN (set by startup). */
 void main(void)
 {
+    zx_startup_clear();
+
     /* Sync sequence numbers to current cart RAM state so we don't
        re-process commands that were queued before this boot. */
     wcmd_last_seq = WCMD_SEQ;

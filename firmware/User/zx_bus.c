@@ -925,14 +925,14 @@ void ZX_Z80Reset (void) {
     gpio.GPIO_Speed = GPIO_Speed_2MHz;
     GPIO_Init (GPIOC, &gpio);
     GPIO_ResetBits (GPIOC, GPIO_Pin_6);   /* pull /RESET LOW */
-    Delay_Ms (5u);                         /* hold for 5 ms  */
+    Delay_Ms (80u);                        /* hold for 80 ms */
     GPIO_SetBits (GPIOC, GPIO_Pin_6);     /* release (OD → floats HIGH via pull-up) */
     /* Return pin to input pull-up (passive monitoring). */
     gpio.GPIO_Mode = GPIO_Mode_IPU;
     GPIO_Init (GPIOC, &gpio);
-    /* Wait for zxprog startup: DI/init (5ms) + screen clear LDIR (36ms)
-       + BSS/data init + IM1+EI + main() setup = allow 200ms total. */
-    Delay_Ms (200u);
+     /* zxprog now clears 48K RAM at startup; allow enough time for that
+         work to complete before host-side loaders start mailbox traffic. */
+     Delay_Ms (1200u);
 }
 
 void ZX_RomcsRelease (void) {
