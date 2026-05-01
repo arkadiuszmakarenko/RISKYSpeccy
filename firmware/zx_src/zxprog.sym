@@ -8,24 +8,44 @@ Symbol Table
     .__.CPU.                                                    =  000000 L
     .__.H$L.                                                    =  000000 L
     _ULA_PORT                                                   =  0000FE 
-  0 _main                                                          000119 GR
-  0 _nmi_handler_c                                                 000113 GR
+  0 _kbd_decode_press                                              0000B1 R
+  0 _kbd_poll_publish                                              0003EC R
+  1 _kbd_prev0                                                     000002 R
+  1 _kbd_prev1                                                     000003 R
+  1 _kbd_prev2                                                     000004 R
+  1 _kbd_prev3                                                     000005 R
+  1 _kbd_prev4                                                     000006 R
+  1 _kbd_prev5                                                     000007 R
+  1 _kbd_prev6                                                     000008 R
+  1 _kbd_prev7                                                     000009 R
+  0 _kbd_publish                                                   00009B R
+  0 _kbd_row0_read                                                 000063 R
+  0 _kbd_row1_read                                                 00006A R
+  0 _kbd_row2_read                                                 000071 R
+  0 _kbd_row3_read                                                 000078 R
+  0 _kbd_row4_read                                                 00007F R
+  0 _kbd_row5_read                                                 000086 R
+  0 _kbd_row6_read                                                 00008D R
+  0 _kbd_row7_read                                                 000094 R
+  0 _main                                                          0005B5 GR
+  0 _nmi_handler_c                                                 0005AC GR
   1 _rcmd_last_seq                                                 000001 R
-  0 _rcmd_poll                                                     0000D9 R
+  0 _rcmd_poll                                                     000572 R
   1 _wcmd_last_seq                                                 000000 R
-  0 _wcmd_poll                                                     00007D R
+  0 _wcmd_poll                                                     000516 R
   0 _zcopy                                                         000000 R
   0 _zfill                                                         000040 R
     _zx_launcher                                                   ****** GX
-  0 _zx_startup_clear                                              000063 R
+  0 _zx_startup_clear                                              0004FC R
+
 
 ASxxxx Assembler V02.00 + NoICE + SDCC mods  (Zilog Z80 / Hitachi HD64180 / ZX-Next / eZ80), page 2.
 Hexadecimal [24-Bits]
 
 Area Table
 
-   0 _CODE                                      size    140   flags    0
-   1 _DATA                                      size      2   flags    0
+   0 _CODE                                      size    60F   flags    0
+   1 _DATA                                      size      A   flags    0
    2 _INITIALIZED                               size      0   flags    0
    3 _DABS                                      size      0   flags    8
    4 _HOME                                      size      0   flags    0

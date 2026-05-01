@@ -31,6 +31,9 @@
 #define ZX_SCREEN_PIXELS_LEN  6144u
 #define ZX_SCREEN_ATTRS_ADDR  0x5800u
 #define ZX_SCREEN_ATTRS_LEN   768u
+#define ZX_TERM_COLS          32u
+#define ZX_TERM_ROWS          24u
+#define ZX_TERM_NMI_TO        220u
 
 #define ZX_GFXTEST_FRAMES   5u
 #define ZX_GFXTEST_FRAME_MS 700u
@@ -49,6 +52,191 @@ static uint8_t s_gfx_pixels[ZX_SCREEN_PIXELS_LEN];
 static uint8_t s_gfx_attrs[ZX_SCREEN_ATTRS_LEN];
 static uint8_t s_bridge_seq = 0u;
 static uint8_t s_view_seq = 0u;
+
+static uint8_t s_term_chars[ZX_TERM_ROWS][ZX_TERM_COLS];
+static uint8_t s_term_attrs[ZX_TERM_ROWS][ZX_TERM_COLS];
+static uint8_t s_term_row = 0u;
+static uint8_t s_term_col = 0u;
+static uint8_t s_term_fg = 0u;  /* black */
+static uint8_t s_term_bg = 7u;  /* white */
+static uint8_t s_term_bright = 0u;
+static uint8_t s_term_esc_state = 0u; /* 0=normal,1=ESC,2=CSI */
+static uint8_t s_term_csi_param[4];
+static uint8_t s_term_csi_count = 0u;
+static uint8_t s_term_csi_building = 0u;
+static uint8_t s_term_csi_value = 0u;
+
+static const uint8_t s_font4x7_chars[] =
+    " 0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ-.:/_";
+
+static const uint8_t s_font4x7[][7] = {
+    {0x0u,0x0u,0x0u,0x0u,0x0u,0x0u,0x0u}, /* space */
+    {0x6u,0x9u,0x9u,0x9u,0x9u,0x9u,0x6u}, /* 0 */
+    {0x2u,0x6u,0x2u,0x2u,0x2u,0x2u,0x7u}, /* 1 */
+    {0x6u,0x9u,0x1u,0x2u,0x4u,0x8u,0xFu}, /* 2 */
+    {0xEu,0x1u,0x1u,0x6u,0x1u,0x1u,0xEu}, /* 3 */
+    {0x1u,0x3u,0x5u,0x9u,0xFu,0x1u,0x1u}, /* 4 */
+    {0xFu,0x8u,0x8u,0xEu,0x1u,0x1u,0xEu}, /* 5 */
+    {0x6u,0x8u,0x8u,0xEu,0x9u,0x9u,0x6u}, /* 6 */
+    {0xFu,0x1u,0x2u,0x2u,0x4u,0x4u,0x4u}, /* 7 */
+    {0x6u,0x9u,0x9u,0x6u,0x9u,0x9u,0x6u}, /* 8 */
+    {0x6u,0x9u,0x9u,0x7u,0x1u,0x1u,0x6u}, /* 9 */
+    {0x6u,0x9u,0x9u,0xFu,0x9u,0x9u,0x9u}, /* A */
+    {0xEu,0x9u,0x9u,0xEu,0x9u,0x9u,0xEu}, /* B */
+    {0x6u,0x9u,0x8u,0x8u,0x8u,0x9u,0x6u}, /* C */
+    {0xEu,0x9u,0x9u,0x9u,0x9u,0x9u,0xEu}, /* D */
+    {0xFu,0x8u,0x8u,0xEu,0x8u,0x8u,0xFu}, /* E */
+    {0xFu,0x8u,0x8u,0xEu,0x8u,0x8u,0x8u}, /* F */
+    {0x6u,0x9u,0x8u,0xBu,0x9u,0x9u,0x7u}, /* G */
+    {0x9u,0x9u,0x9u,0xFu,0x9u,0x9u,0x9u}, /* H */
+    {0x7u,0x2u,0x2u,0x2u,0x2u,0x2u,0x7u}, /* I */
+    {0x1u,0x1u,0x1u,0x1u,0x9u,0x9u,0x6u}, /* J */
+    {0x9u,0xAu,0xCu,0x8u,0xCu,0xAu,0x9u}, /* K */
+    {0x8u,0x8u,0x8u,0x8u,0x8u,0x8u,0xFu}, /* L */
+    {0x9u,0xFu,0xFu,0x9u,0x9u,0x9u,0x9u}, /* M */
+    {0x9u,0xDu,0xDu,0xBu,0xBu,0x9u,0x9u}, /* N */
+    {0x6u,0x9u,0x9u,0x9u,0x9u,0x9u,0x6u}, /* O */
+    {0xEu,0x9u,0x9u,0xEu,0x8u,0x8u,0x8u}, /* P */
+    {0x6u,0x9u,0x9u,0x9u,0xBu,0xAu,0x5u}, /* Q */
+    {0xEu,0x9u,0x9u,0xEu,0xCu,0xAu,0x9u}, /* R */
+    {0x7u,0x8u,0x8u,0x6u,0x1u,0x1u,0xEu}, /* S */
+    {0xFu,0x2u,0x2u,0x2u,0x2u,0x2u,0x2u}, /* T */
+    {0x9u,0x9u,0x9u,0x9u,0x9u,0x9u,0x6u}, /* U */
+    {0x9u,0x9u,0x9u,0x9u,0x9u,0x6u,0x6u}, /* V */
+    {0x9u,0x9u,0x9u,0x9u,0xFu,0xFu,0x9u}, /* W */
+    {0x9u,0x9u,0x6u,0x6u,0x6u,0x9u,0x9u}, /* X */
+    {0x9u,0x9u,0x6u,0x2u,0x2u,0x2u,0x2u}, /* Y */
+    {0xFu,0x1u,0x2u,0x4u,0x8u,0x8u,0xFu}, /* Z */
+    {0x0u,0x0u,0x0u,0xFu,0x0u,0x0u,0x0u}, /* - */
+    {0x0u,0x0u,0x0u,0x0u,0x0u,0x6u,0x6u}, /* . */
+    {0x0u,0x6u,0x6u,0x0u,0x6u,0x6u,0x0u}, /* : */
+    {0x1u,0x1u,0x2u,0x2u,0x4u,0x8u,0x8u}, /* / */
+    {0x0u,0x0u,0x0u,0x0u,0x0u,0x0u,0xFu}  /* _ */
+};
+
+static uint8_t ZX_Font4x7Row (uint8_t ch, uint8_t row) {
+    uint8_t i;
+
+    if (row >= 7u) {
+        return 0u;
+    }
+    if ((ch >= 'a') && (ch <= 'z')) {
+        ch = (uint8_t)(ch - ('a' - 'A'));
+    }
+    for (i = 0u; s_font4x7_chars[i] != '\0'; ++i) {
+        if ((uint8_t)s_font4x7_chars[i] == ch) {
+            return s_font4x7[i][row];
+        }
+    }
+    return 0u;
+}
+
+static uint16_t ZX_PixelAddr (uint8_t y, uint8_t x_byte) {
+    uint16_t addr = ZX_SCREEN_PIXELS_ADDR;
+    addr = (uint16_t)(addr + (uint16_t)((uint16_t)(y & 0xC0u) << 5));
+    addr = (uint16_t)(addr + (uint16_t)((uint16_t)(y & 0x07u) << 8));
+    addr = (uint16_t)(addr + (uint16_t)((uint16_t)(y & 0x38u) << 2));
+    addr = (uint16_t)(addr + x_byte);
+    return addr;
+}
+
+static uint8_t ZX_Expand4To8 (uint8_t bits4) {
+    uint8_t out = 0u;
+    if ((bits4 & 0x8u) != 0u) { out |= 0xC0u; }
+    if ((bits4 & 0x4u) != 0u) { out |= 0x30u; }
+    if ((bits4 & 0x2u) != 0u) { out |= 0x0Cu; }
+    if ((bits4 & 0x1u) != 0u) { out |= 0x03u; }
+    return out;
+}
+
+static uint8_t ZX_TermCurrentAttr (void) {
+    return (uint8_t)(((s_term_bright & 1u) << 6) | ((s_term_bg & 7u) << 3) | (s_term_fg & 7u));
+}
+
+static void ZX_TermRenderCellToBuffers (uint8_t col, uint8_t row) {
+    uint8_t r;
+    uint8_t attr = s_term_attrs[row][col];
+    uint8_t ch = s_term_chars[row][col];
+
+    for (r = 0u; r < 8u; ++r) {
+        uint8_t pix = (r < 7u) ? ZX_Expand4To8 (ZX_Font4x7Row (ch, r)) : 0u;
+        uint16_t addr = (uint16_t)(ZX_PixelAddr ((uint8_t)(row * 8u + r), col) - ZX_SCREEN_PIXELS_ADDR);
+        s_gfx_pixels[addr] = pix;
+    }
+
+    s_gfx_attrs[(uint16_t)row * ZX_TERM_COLS + col] = attr;
+}
+
+static void ZX_TermRenderAllToBuffers (void) {
+    uint8_t y;
+    uint8_t x;
+
+    memset (s_gfx_pixels, 0, sizeof (s_gfx_pixels));
+    for (y = 0u; y < ZX_TERM_ROWS; ++y) {
+        for (x = 0u; x < ZX_TERM_COLS; ++x) {
+            ZX_TermRenderCellToBuffers (x, y);
+        }
+    }
+}
+
+static int ZX_TermFlushBuffers (void) {
+    if (!ZX_NmiWriteBlock (ZX_SCREEN_PIXELS_ADDR,
+                           s_gfx_pixels,
+                           ZX_SCREEN_PIXELS_LEN,
+                           ZX_TERM_NMI_TO)) {
+        return 0;
+    }
+    if (!ZX_NmiWriteBlock (ZX_SCREEN_ATTRS_ADDR,
+                           s_gfx_attrs,
+                           ZX_SCREEN_ATTRS_LEN,
+                           ZX_TERM_NMI_TO)) {
+        return 0;
+    }
+    return 1;
+}
+
+static int ZX_TermCommit (void) {
+    ZX_TermRenderAllToBuffers();
+    if (!ZX_TermFlushBuffers()) {
+        return 0;
+    }
+    return 1;
+}
+
+static void ZX_TermModelClear (void) {
+    uint8_t y;
+    uint8_t x;
+    uint8_t attr = ZX_TermCurrentAttr();
+
+    for (y = 0u; y < ZX_TERM_ROWS; ++y) {
+        for (x = 0u; x < ZX_TERM_COLS; ++x) {
+            s_term_chars[y][x] = ' ';
+            s_term_attrs[y][x] = attr;
+        }
+    }
+}
+
+static int ZX_TermClear (void) {
+    s_term_row = 0u;
+    s_term_col = 0u;
+    ZX_TermModelClear();
+    return 1;
+}
+
+static int ZX_TermScrollUp (void) {
+    uint8_t x;
+    uint8_t attr = ZX_TermCurrentAttr();
+
+    memmove (&s_term_chars[0][0], &s_term_chars[1][0], (ZX_TERM_ROWS - 1u) * ZX_TERM_COLS);
+    memmove (&s_term_attrs[0][0], &s_term_attrs[1][0], (ZX_TERM_ROWS - 1u) * ZX_TERM_COLS);
+
+    for (x = 0u; x < ZX_TERM_COLS; ++x) {
+        s_term_chars[ZX_TERM_ROWS - 1u][x] = ' ';
+        s_term_attrs[ZX_TERM_ROWS - 1u][x] = attr;
+    }
+
+    return 1;
+}
 
 static USART_TypeDef *ZX_DebugUart (void) {
 #if(DEBUG == DEBUG_UART1)
@@ -133,6 +321,11 @@ static void ZX_PrintHelp (void) {
     printf("  ramtest [addr] [len]         - write/read patterns across ZX RAM (default C000/4000)\r\n");
     printf("  zxview <addr> [len]          - show live ZX RAM bytes on screen\r\n");
     printf("  zxmsg <text>                 - send text to ZX on-screen host bridge\r\n");
+    printf("  zxttyinit                    - init MPU-side terminal and clear screen\r\n");
+    printf("  zxtty <text>                 - write text/escapes (\\n \\r \\t \\e[...m) via MPU\r\n");
+    printf("  zxttytest                    - render terminal demo/test pattern\r\n");
+    printf("  keyread                      - read one ZX key event from mailbox\r\n");
+    printf("  keytest [count] [timeout_ms] - wait for ZX key event(s) and print them\r\n");
     printf("  nmi                          - trigger NMI pulse\r\n");
     printf("  test [addr]                  - %u-byte self-test in 3000..3FFF (hex addr)\r\n", (unsigned)ZX_TEST_LEN);
     printf("  busdiag                      - probe all ZX memory regions for r/w\r\n");
@@ -232,6 +425,417 @@ static void ZX_CommandBridgeText (char *firstToken) {
 
     ZX_TriggerNMI();
     printf("ZX message sent (%u chars)\r\n", (unsigned)len);
+}
+
+static int ZX_TermPutVisible (uint8_t ch) {
+    s_term_chars[s_term_row][s_term_col] = ch;
+    s_term_attrs[s_term_row][s_term_col] = ZX_TermCurrentAttr();
+
+    ++s_term_col;
+    if (s_term_col >= ZX_TERM_COLS) {
+        s_term_col = 0u;
+        ++s_term_row;
+        if (s_term_row >= ZX_TERM_ROWS) {
+            s_term_row = (uint8_t)(ZX_TERM_ROWS - 1u);
+            if (!ZX_TermScrollUp()) {
+                return 0;
+            }
+        }
+    }
+    return 1;
+}
+
+static int ZX_TermHandleBasic (uint8_t ch) {
+    if (ch == '\r') {
+        s_term_col = 0u;
+        return 1;
+    }
+    if (ch == '\n') {
+        s_term_col = 0u;
+        ++s_term_row;
+        if (s_term_row >= ZX_TERM_ROWS) {
+            s_term_row = (uint8_t)(ZX_TERM_ROWS - 1u);
+            return ZX_TermScrollUp();
+        }
+        return 1;
+    }
+    if (ch == '\b') {
+        if (s_term_col > 0u) {
+            --s_term_col;
+        }
+        s_term_chars[s_term_row][s_term_col] = ' ';
+        s_term_attrs[s_term_row][s_term_col] = ZX_TermCurrentAttr();
+        return 1;
+    }
+    if (ch == '\t') {
+        uint8_t next_tab = (uint8_t)((s_term_col + 4u) & (uint8_t)~3u);
+        while (s_term_col < next_tab) {
+            if (!ZX_TermPutVisible (' ')) {
+                return 0;
+            }
+        }
+        return 1;
+    }
+
+    if (ch < 0x20u) {
+        return 1;
+    }
+
+    if (ch > 0x7Eu) {
+        ch = '?';
+    }
+
+    if ((ch >= 'a') && (ch <= 'z')) {
+        ch = (uint8_t)(ch - ('a' - 'A'));
+    }
+
+    if (!strchr ((const char *)s_font4x7_chars, (int)ch)) {
+        ch = ' ';
+    }
+
+    return ZX_TermPutVisible (ch);
+}
+
+static uint8_t ZX_TermCsiParam (uint8_t index, uint8_t default_value) {
+    if (index >= s_term_csi_count) {
+        return default_value;
+    }
+    return (s_term_csi_param[index] == 0u) ? default_value : s_term_csi_param[index];
+}
+
+static void ZX_TermApplySgrOne (uint8_t p) {
+    if (p == 0u) {
+        s_term_fg = 0u;
+        s_term_bg = 7u;
+        s_term_bright = 0u;
+        return;
+    }
+    if (p == 1u) {
+        s_term_bright = 1u;
+        return;
+    }
+    if ((p >= 30u) && (p <= 37u)) {
+        s_term_fg = (uint8_t)(p - 30u);
+        return;
+    }
+    if ((p >= 40u) && (p <= 47u)) {
+        s_term_bg = (uint8_t)(p - 40u);
+        return;
+    }
+}
+
+static int ZX_TermHandleCsiFinal (uint8_t final_ch) {
+    uint8_t n;
+    uint8_t y;
+    uint8_t x;
+
+    if (final_ch == 'H' || final_ch == 'f') {
+        uint8_t row = ZX_TermCsiParam (0u, 1u);
+        uint8_t col = ZX_TermCsiParam (1u, 1u);
+        if (row > ZX_TERM_ROWS) { row = ZX_TERM_ROWS; }
+        if (col > ZX_TERM_COLS) { col = ZX_TERM_COLS; }
+        s_term_row = (uint8_t)(row - 1u);
+        s_term_col = (uint8_t)(col - 1u);
+        return 1;
+    }
+
+    if (final_ch == 'A') {
+        n = ZX_TermCsiParam (0u, 1u);
+        s_term_row = (s_term_row > n) ? (uint8_t)(s_term_row - n) : 0u;
+        return 1;
+    }
+    if (final_ch == 'B') {
+        n = ZX_TermCsiParam (0u, 1u);
+        s_term_row = (uint8_t)((s_term_row + n < ZX_TERM_ROWS) ? (s_term_row + n) : (ZX_TERM_ROWS - 1u));
+        return 1;
+    }
+    if (final_ch == 'C') {
+        n = ZX_TermCsiParam (0u, 1u);
+        s_term_col = (uint8_t)((s_term_col + n < ZX_TERM_COLS) ? (s_term_col + n) : (ZX_TERM_COLS - 1u));
+        return 1;
+    }
+    if (final_ch == 'D') {
+        n = ZX_TermCsiParam (0u, 1u);
+        s_term_col = (s_term_col > n) ? (uint8_t)(s_term_col - n) : 0u;
+        return 1;
+    }
+
+    if (final_ch == 'J') {
+        return ZX_TermClear();
+    }
+
+    if (final_ch == 'K') {
+        for (x = s_term_col; x < ZX_TERM_COLS; ++x) {
+            s_term_chars[s_term_row][x] = ' ';
+            s_term_attrs[s_term_row][x] = ZX_TermCurrentAttr();
+        }
+        return 1;
+    }
+
+    if (final_ch == 'm') {
+        if (s_term_csi_count == 0u) {
+            ZX_TermApplySgrOne (0u);
+            return 1;
+        }
+        for (y = 0u; y < s_term_csi_count; ++y) {
+            ZX_TermApplySgrOne (s_term_csi_param[y]);
+        }
+        return 1;
+    }
+
+    return 1;
+}
+
+static void ZX_TermCsiReset (void) {
+    s_term_csi_count = 0u;
+    s_term_csi_building = 0u;
+    s_term_csi_value = 0u;
+}
+
+static int ZX_TermWriteByte (uint8_t ch) {
+    if (s_term_esc_state == 0u) {
+        if (ch == 0x1Bu) {
+            s_term_esc_state = 1u;
+            return 1;
+        }
+        return ZX_TermHandleBasic (ch);
+    }
+
+    if (s_term_esc_state == 1u) {
+        if (ch == '[') {
+            s_term_esc_state = 2u;
+            ZX_TermCsiReset();
+            return 1;
+        }
+        s_term_esc_state = 0u;
+        return 1;
+    }
+
+    if ((ch >= '0') && (ch <= '9')) {
+        s_term_csi_value = (uint8_t)(s_term_csi_value * 10u + (ch - '0'));
+        s_term_csi_building = 1u;
+        return 1;
+    }
+    if (ch == ';') {
+        if (s_term_csi_count < 4u) {
+            s_term_csi_param[s_term_csi_count++] = s_term_csi_building ? s_term_csi_value : 0u;
+        }
+        s_term_csi_value = 0u;
+        s_term_csi_building = 0u;
+        return 1;
+    }
+
+    if (s_term_csi_count < 4u) {
+        s_term_csi_param[s_term_csi_count++] = s_term_csi_building ? s_term_csi_value : 0u;
+    }
+    s_term_esc_state = 0u;
+    return ZX_TermHandleCsiFinal (ch);
+}
+
+static int ZX_TermWriteBuffer (const uint8_t *buf, uint16_t len) {
+    uint16_t i;
+    if ((buf == NULL) && (len != 0u)) {
+        return 0;
+    }
+    for (i = 0u; i < len; ++i) {
+        if (!ZX_TermWriteByte (buf[i])) {
+            return 0;
+        }
+    }
+    return 1;
+}
+
+static void ZX_CommandTermInit (void) {
+    s_term_fg = 0u;
+    s_term_bg = 7u;
+    s_term_bright = 0u;
+    s_term_esc_state = 0u;
+    ZX_TermCsiReset();
+
+    if (!ZX_TermClear() || !ZX_TermCommit()) {
+        printf("ERR: terminal init draw failed\r\n");
+        return;
+    }
+    printf("ZX terminal ready (MPU-rendered 32x24, white bg/black text)\r\n");
+}
+
+static int ZX_ParseEscapedText (const char *in, uint8_t *out, uint16_t out_max, uint16_t *out_len) {
+    uint16_t w = 0u;
+
+    while ((in != NULL) && (*in != '\0')) {
+        uint8_t ch = (uint8_t)*in++;
+        if ((ch == '\\') && (*in != '\0')) {
+            char n = *in++;
+            if (n == 'n') { ch = '\n'; }
+            else if (n == 'r') { ch = '\r'; }
+            else if (n == 't') { ch = '\t'; }
+            else if (n == 'e') { ch = 0x1Bu; }
+            else if (n == '\\') { ch = '\\'; }
+            else { ch = (uint8_t)n; }
+        }
+
+        if (w >= out_max) {
+            return 0;
+        }
+        out[w++] = ch;
+    }
+
+    *out_len = w;
+    return 1;
+}
+
+static void ZX_CommandTermWrite (char *firstToken) {
+    uint8_t buf[192];
+    uint16_t len = 0u;
+    char joined[192];
+    uint16_t used = 0u;
+    char *tok = firstToken;
+
+    if (tok == NULL) {
+        printf("Usage: zxtty <text with \\n \\r \\t \\e escapes>\r\n");
+        return;
+    }
+
+    joined[0] = '\0';
+    while ((tok != NULL) && (used < (uint16_t)(sizeof (joined) - 2u))) {
+        uint16_t l = (uint16_t)strlen (tok);
+        if (used != 0u) {
+            joined[used++] = ' ';
+            joined[used] = '\0';
+        }
+        if (used + l >= (uint16_t)sizeof (joined)) {
+            l = (uint16_t)(sizeof (joined) - used - 1u);
+        }
+        memcpy (&joined[used], tok, l);
+        used = (uint16_t)(used + l);
+        joined[used] = '\0';
+        tok = strtok (NULL, " \t");
+    }
+
+    if (!ZX_ParseEscapedText (joined, buf, (uint16_t)sizeof (buf), &len)) {
+        printf("ERR: zxtty input too long\r\n");
+        return;
+    }
+
+    if (!ZX_TermWriteBuffer (buf, len)) {
+        printf("ERR: zxtty write failed\r\n");
+        return;
+    }
+    if (!ZX_TermCommit()) {
+        printf("ERR: zxtty flush failed\r\n");
+        return;
+    }
+}
+
+static void ZX_CommandTermTest (void) {
+    static const uint8_t kTermTestScript[] =
+        "ZX MPU TERMINAL TEST\n"
+        "DEFAULT: BLACK ON WHITE\n"
+        "\\e[31mRED \\e[32mGREEN \\e[34mBLUE \\e[30;47mRESET\n"
+        "TAB:\tCOL2\tCOL3\n"
+        "CURSOR MOVE NEXT...\n"
+        "\\e[10;6HROW10 COL6\n"
+        "\\e[12;1HCLEAR TO EOL -> XXXXX\\e[K\n"
+        "\\e[22;1HSCROLL TEST START\n"
+        "LINE 23\n"
+        "LINE 24\n"
+        "LINE 25 -> SHOULD SCROLL";
+    uint8_t parsed[256];
+    uint16_t len = 0u;
+
+    ZX_CommandTermInit();
+    if (!ZX_ParseEscapedText ((const char *)kTermTestScript,
+                              parsed,
+                              (uint16_t)sizeof (parsed),
+                              &len)) {
+        printf("ERR: zxttytest script parse failed\r\n");
+        return;
+    }
+
+    if (!ZX_TermWriteBuffer (parsed, len)) {
+        printf("ERR: zxttytest draw failed\r\n");
+        return;
+    }
+    if (!ZX_TermCommit()) {
+        printf("ERR: zxttytest flush failed\r\n");
+        return;
+    }
+
+    printf("zxttytest: terminal demo rendered\r\n");
+}
+
+static void ZX_CommandKeyRead (void) {
+    uint8_t key = 0u;
+    int rc = ZX_KeyPoll (&key);
+    if (rc < 0) {
+        printf("ERR: key mailbox read failed\r\n");
+        return;
+    }
+    if (rc == 0) {
+        printf("No key event\r\n");
+        return;
+    }
+
+    if ((key >= 32u) && (key <= 126u)) {
+        printf("KEY: 0x%02X '%c'\r\n", (unsigned)key, (char)key);
+    } else {
+        printf("KEY: 0x%02X\r\n", (unsigned)key);
+    }
+}
+
+static void ZX_CommandKeyTest (uint8_t wanted_count, uint32_t timeout_ms) {
+    uint8_t got = 0u;
+    uint32_t waited = 0u;
+
+    if (wanted_count == 0u) {
+        wanted_count = 1u;
+    }
+    if (timeout_ms == 0u) {
+        timeout_ms = 3000u;
+    }
+
+    printf("keytest: waiting for %u key event%s (%lu ms timeout)\r\n",
+           (unsigned)wanted_count,
+           (wanted_count == 1u) ? "" : "s",
+           (unsigned long)timeout_ms);
+
+    while ((got < wanted_count) && (waited < timeout_ms)) {
+        uint8_t key = 0u;
+        int rc = ZX_KeyPoll (&key);
+
+        if (rc < 0) {
+            printf("ERR: key mailbox read failed\r\n");
+            return;
+        }
+
+        if (rc > 0) {
+            ++got;
+            if ((key >= 32u) && (key <= 126u)) {
+                printf("  [%u] 0x%02X '%c'\r\n",
+                       (unsigned)got,
+                       (unsigned)key,
+                       (char)key);
+            } else {
+                printf("  [%u] 0x%02X\r\n",
+                       (unsigned)got,
+                       (unsigned)key);
+            }
+        } else {
+            Delay_Ms (10u);
+            waited += 10u;
+        }
+    }
+
+    if (got == wanted_count) {
+        printf("keytest: PASS (%u event%s)\r\n",
+               (unsigned)got,
+               (got == 1u) ? "" : "s");
+    } else {
+        printf("keytest: TIMEOUT (%u/%u event%s)\r\n",
+               (unsigned)got,
+               (unsigned)wanted_count,
+               (wanted_count == 1u) ? "" : "s");
+    }
 }
 
 static void ZX_PrintHexLine (uint16_t address, const uint8_t *buffer, uint16_t count) {
@@ -1130,6 +1734,50 @@ static void ZX_ExecuteCommand (char *line) {
     if (ZX_StrIeq (cmd, "zxmsg")) {
         a0 = strtok (NULL, " \t");
         ZX_CommandBridgeText (a0);
+        return;
+    }
+
+    if (ZX_StrIeq (cmd, "zxttyinit")) {
+        ZX_CommandTermInit();
+        return;
+    }
+
+    if (ZX_StrIeq (cmd, "zxtty")) {
+        a0 = strtok (NULL, " \t");
+        ZX_CommandTermWrite (a0);
+        return;
+    }
+
+    if (ZX_StrIeq (cmd, "zxttytest")) {
+        ZX_CommandTermTest();
+        return;
+    }
+
+    if (ZX_StrIeq (cmd, "keyread")) {
+        ZX_CommandKeyRead();
+        return;
+    }
+
+    if (ZX_StrIeq (cmd, "keytest")) {
+        uint32_t count = 1u;
+        uint32_t timeout_ms = 3000u;
+
+        a0 = strtok (NULL, " \t");
+        a1 = strtok (NULL, " \t");
+        if (a0 != NULL) {
+            if (!ZX_ParseU32 (a0, &count) || (count == 0u) || (count > 32u)) {
+                printf("Usage: keytest [count 1..32] [timeout_ms]\r\n");
+                return;
+            }
+        }
+        if (a1 != NULL) {
+            if (!ZX_ParseU32 (a1, &timeout_ms) || (timeout_ms == 0u) || (timeout_ms > 60000u)) {
+                printf("Usage: keytest [count 1..32] [timeout_ms]\r\n");
+                return;
+            }
+        }
+
+        ZX_CommandKeyTest ((uint8_t)count, timeout_ms);
         return;
     }
 

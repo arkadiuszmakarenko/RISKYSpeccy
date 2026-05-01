@@ -41,6 +41,9 @@
 
 #define ZX_BUS_TIMEOUT        120000u
 
+#define ZX_KEY_SEQ_ADDR       0x3028u
+#define ZX_KEY_CODE_ADDR      0x3029u
+
 struct ZXCartState {
     uint32_t BusOn;
     uint32_t BusOff;
@@ -57,6 +60,7 @@ struct ZXCartState {
 static struct ZXCartState s_state;
 static struct ZXCartState *state_pointer;
 static volatile int s_rom_released = 0;
+static uint8_t s_key_last_seq = 0u;
 
 /* M1 handover: when armed, the cart ISR drops ROMCS the instant the Z80 does
    an opcode (M1) fetch from s_handover_addr.  Used by the .z80 snapshot
@@ -367,6 +371,29 @@ int ZX_CartRamWriteBlock (uint16_t address, const uint8_t *buffer, uint16_t leng
     return 1;
 }
 
+int ZX_KeyPoll (uint8_t *keycode_out) {
+    uint8_t seq;
+    uint8_t code;
+
+    if (keycode_out == NULL) {
+        return -1;
+    }
+
+    if (!ZX_CartRamReadBlock (ZX_KEY_SEQ_ADDR, &seq, 1u)) {
+        return -1;
+    }
+    if (seq == s_key_last_seq) {
+        return 0;
+    }
+    if (!ZX_CartRamReadBlock (ZX_KEY_CODE_ADDR, &code, 1u)) {
+        return -1;
+    }
+
+    s_key_last_seq = seq;
+    *keycode_out = code;
+    return 1;
+}
+
 void ZX_TriggerNMI (void) {
     (void)ZX_WaitClockToggle (ZX_BUS_TIMEOUT);
     GPIO_ResetBits (GPIOB, ZX_PIN_INT);
@@ -646,6 +673,8 @@ void Init_Cart() {
     EXTI->INTFR = state_pointer->IRQLine;
     SetVTFIRQ ((u32)RunCartWithRAM, EXTI15_10_IRQn, 0, ENABLE);
     NVIC_EnableIRQ (EXTI15_10_IRQn);
+
+    (void)ZX_CartRamReadBlock (ZX_KEY_SEQ_ADDR, &s_key_last_seq, 1u);
 }
 
 void RunCart16k (void) {

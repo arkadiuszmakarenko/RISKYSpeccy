@@ -21,6 +21,7 @@
  *   0x302E..0x302F  WCMD_SEQ / WCMD_DONE
  *   0x3030..0x3033  WCMD_DST_LO/HI, WCMD_LEN_LO/HI
  *   0x3034..0x3233  WCMD_DATA (512 bytes max)
+ *   0x3028..0x3029  KEY_SEQ / KEY_CODE (ZX->MPU key events)
  *   0x3F00..0x3F01  BSS (wcmd_last_seq, rcmd_last_seq) — placed by linker
  *   0x3F10          LAUNCH_TRIGGER  (CH32 writes 0x55)
  *   0x3F20..0x3F24  RCMD meta
@@ -41,6 +42,10 @@
 #define WCMD_LEN_HI_ADDR 0x3033u
 #define WCMD_DATA_ADDR   0x3034u
 #define WCMD_MAX_DATA    0x0200u    /* 512 bytes max per WCMD chunk */
+
+/* ZX->MPU key mailbox */
+#define KEY_SEQ_ADDR     0x3028u
+#define KEY_CODE_ADDR    0x3029u
 
 /* ZX RAM region to clear at startup (48K: 0x4000..0xFFFF) */
 #define ZX_RAM_BASE_ADDR 0x4000u
@@ -66,6 +71,9 @@
 #define WCMD_LEN_LO  (*((volatile unsigned char *)WCMD_LEN_LO_ADDR))
 #define WCMD_LEN_HI  (*((volatile unsigned char *)WCMD_LEN_HI_ADDR))
 
+#define KEY_SEQ      (*((volatile unsigned char *)KEY_SEQ_ADDR))
+#define KEY_CODE     (*((volatile unsigned char *)KEY_CODE_ADDR))
+
 #define RCMD_SEQ     (*((volatile unsigned char *)RCMD_SEQ_ADDR))
 #define RCMD_DONE    (*((volatile unsigned char *)RCMD_DONE_ADDR))
 #define RCMD_SRC_LO  (*((volatile unsigned char *)RCMD_SRC_LO_ADDR))
@@ -79,6 +87,14 @@
    so zero-initialisation by the CRT is not required. */
 static volatile unsigned char wcmd_last_seq;   /* 0x3F00 */
 static volatile unsigned char rcmd_last_seq;   /* 0x3F01 */
+static volatile unsigned char kbd_prev0;
+static volatile unsigned char kbd_prev1;
+static volatile unsigned char kbd_prev2;
+static volatile unsigned char kbd_prev3;
+static volatile unsigned char kbd_prev4;
+static volatile unsigned char kbd_prev5;
+static volatile unsigned char kbd_prev6;
+static volatile unsigned char kbd_prev7;
 
 /* Startup, NMI wrapper, and zx_launcher are in crt0.s */
 extern void zx_launcher(void);
@@ -96,6 +112,229 @@ static void zfill(unsigned char *dst, unsigned char value, unsigned int len)
 {
     while (len--) {
         *dst++ = value;
+    }
+}
+
+/* ---- keyboard scan (ZX matrix via port FE) ---- */
+static unsigned char kbd_row0_read(void) __naked
+{
+__asm
+    ld bc, #0xFEFE
+    in a, (c)
+    ld l, a
+    ret
+__endasm;
+}
+
+static unsigned char kbd_row1_read(void) __naked
+{
+__asm
+    ld bc, #0xFDFE
+    in a, (c)
+    ld l, a
+    ret
+__endasm;
+}
+
+static unsigned char kbd_row2_read(void) __naked
+{
+__asm
+    ld bc, #0xFBFE
+    in a, (c)
+    ld l, a
+    ret
+__endasm;
+}
+
+static unsigned char kbd_row3_read(void) __naked
+{
+__asm
+    ld bc, #0xF7FE
+    in a, (c)
+    ld l, a
+    ret
+__endasm;
+}
+
+static unsigned char kbd_row4_read(void) __naked
+{
+__asm
+    ld bc, #0xEFFE
+    in a, (c)
+    ld l, a
+    ret
+__endasm;
+}
+
+static unsigned char kbd_row5_read(void) __naked
+{
+__asm
+    ld bc, #0xDFFE
+    in a, (c)
+    ld l, a
+    ret
+__endasm;
+}
+
+static unsigned char kbd_row6_read(void) __naked
+{
+__asm
+    ld bc, #0xBFFE
+    in a, (c)
+    ld l, a
+    ret
+__endasm;
+}
+
+static unsigned char kbd_row7_read(void) __naked
+{
+__asm
+    ld bc, #0x7FFE
+    in a, (c)
+    ld l, a
+    ret
+__endasm;
+}
+
+static void kbd_publish(unsigned char code)
+{
+    unsigned char seq;
+
+    if (code == 0u) {
+        return;
+    }
+
+    KEY_CODE = code;
+    seq = (unsigned char)(KEY_SEQ + 1u);
+    if (seq == 0u) {
+        seq = 1u;
+    }
+    KEY_SEQ = seq;
+}
+
+static unsigned char kbd_decode_press(unsigned char row, unsigned char bit, unsigned char shift_down)
+{
+    switch (row) {
+    case 0u:
+        switch (bit) {
+        case 1u: return shift_down ? 'Z' : 'z';
+        case 2u: return shift_down ? 'X' : 'x';
+        case 3u: return shift_down ? 'C' : 'c';
+        case 4u: return shift_down ? 'V' : 'v';
+        default: return 0u;
+        }
+    case 1u:
+        switch (bit) {
+        case 0u: return shift_down ? 'A' : 'a';
+        case 1u: return shift_down ? 'S' : 's';
+        case 2u: return shift_down ? 'D' : 'd';
+        case 3u: return shift_down ? 'F' : 'f';
+        case 4u: return shift_down ? 'G' : 'g';
+        default: return 0u;
+        }
+    case 2u:
+        switch (bit) {
+        case 0u: return shift_down ? 'Q' : 'q';
+        case 1u: return shift_down ? 'W' : 'w';
+        case 2u: return shift_down ? 'E' : 'e';
+        case 3u: return shift_down ? 'R' : 'r';
+        case 4u: return shift_down ? 'T' : 't';
+        default: return 0u;
+        }
+    case 3u:
+        switch (bit) {
+        case 0u: return '1';
+        case 1u: return '2';
+        case 2u: return '3';
+        case 3u: return '4';
+        case 4u: return '5';
+        default: return 0u;
+        }
+    case 4u:
+        switch (bit) {
+        case 0u: return '0';
+        case 1u: return '9';
+        case 2u: return '8';
+        case 3u: return '7';
+        case 4u: return '6';
+        default: return 0u;
+        }
+    case 5u:
+        switch (bit) {
+        case 0u: return shift_down ? 'P' : 'p';
+        case 1u: return shift_down ? 'O' : 'o';
+        case 2u: return shift_down ? 'I' : 'i';
+        case 3u: return shift_down ? 'U' : 'u';
+        case 4u: return shift_down ? 'Y' : 'y';
+        default: return 0u;
+        }
+    case 6u:
+        switch (bit) {
+        case 0u: return '\n';
+        case 1u: return shift_down ? 'L' : 'l';
+        case 2u: return shift_down ? 'K' : 'k';
+        case 3u: return shift_down ? 'J' : 'j';
+        case 4u: return shift_down ? 'H' : 'h';
+        default: return 0u;
+        }
+    case 7u:
+        switch (bit) {
+        case 0u: return ' ';
+        case 2u: return shift_down ? 'M' : 'm';
+        case 3u: return shift_down ? 'N' : 'n';
+        case 4u: return shift_down ? 'B' : 'b';
+        default: return 0u;
+        }
+    default:
+        return 0u;
+    }
+}
+
+static void kbd_poll_publish(void)
+{
+    unsigned char rows[8];
+    unsigned char prev[8];
+    unsigned char r;
+    unsigned char b;
+    unsigned char shift_down;
+
+    rows[0] = kbd_row0_read();
+    rows[1] = kbd_row1_read();
+    rows[2] = kbd_row2_read();
+    rows[3] = kbd_row3_read();
+    rows[4] = kbd_row4_read();
+    rows[5] = kbd_row5_read();
+    rows[6] = kbd_row6_read();
+    rows[7] = kbd_row7_read();
+
+    prev[0] = kbd_prev0;
+    prev[1] = kbd_prev1;
+    prev[2] = kbd_prev2;
+    prev[3] = kbd_prev3;
+    prev[4] = kbd_prev4;
+    prev[5] = kbd_prev5;
+    prev[6] = kbd_prev6;
+    prev[7] = kbd_prev7;
+
+    kbd_prev0 = rows[0];
+    kbd_prev1 = rows[1];
+    kbd_prev2 = rows[2];
+    kbd_prev3 = rows[3];
+    kbd_prev4 = rows[4];
+    kbd_prev5 = rows[5];
+    kbd_prev6 = rows[6];
+    kbd_prev7 = rows[7];
+
+    shift_down = ((rows[0] & 0x01u) == 0u) ? 1u : 0u; /* CAPS SHIFT */
+
+    for (r = 0u; r < 8u; ++r) {
+        unsigned char new_presses = (unsigned char)(prev[r] & (unsigned char)~rows[r]);
+        for (b = 0u; b < 5u; ++b) {
+            if ((new_presses & (unsigned char)(1u << b)) != 0u) {
+                kbd_publish(kbd_decode_press(r, b, shift_down));
+                return;
+            }
+        }
     }
 }
 
@@ -159,6 +398,7 @@ void nmi_handler_c(void)
 {
     wcmd_poll();
     rcmd_poll();
+    kbd_poll_publish();
 }
 
 /* ---- Main poll loop ---- */
@@ -172,10 +412,19 @@ void main(void)
        re-process commands that were queued before this boot. */
     wcmd_last_seq = WCMD_SEQ;
     rcmd_last_seq = RCMD_SEQ;
+    kbd_prev0 = kbd_row0_read();
+    kbd_prev1 = kbd_row1_read();
+    kbd_prev2 = kbd_row2_read();
+    kbd_prev3 = kbd_row3_read();
+    kbd_prev4 = kbd_row4_read();
+    kbd_prev5 = kbd_row5_read();
+    kbd_prev6 = kbd_row6_read();
+    kbd_prev7 = kbd_row7_read();
 
     for (;;) {
         wcmd_poll();
         rcmd_poll();
+        kbd_poll_publish();
 
         if (LAUNCH_TRIGGER == LAUNCH_TRIGGER_GO) {
             /* Border: YELLOW = trigger received, about to launch */

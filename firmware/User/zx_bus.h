@@ -17,6 +17,9 @@ void ZX_BusReleaseDbg (void);
 int ZX_BusWriteReadVerify (uint16_t address, uint8_t value, uint8_t *readback_out);
 int ZX_NmiWriteBlock (uint16_t address, const uint8_t *buffer, uint16_t length, uint32_t timeout_ms);
 int ZX_NmiReadBlock  (uint16_t address, uint8_t *buffer, uint8_t length, uint32_t timeout_ms);
+/* Poll next ZX key event published by zxprog (ASCII-ish code).
+   Returns 1 when a new key is available, 0 when no new key, -1 on read error. */
+int ZX_KeyPoll (uint8_t *keycode_out);
 void ZX_CartDrawSuspend (void);
 void ZX_CartDrawResume (void);
 
