@@ -694,136 +694,204 @@ void RunCart16k (void) {
 }
 
 
-void RunCartWithRAM (void) {
-    struct ZXCartState *sp = state_pointer;
-    uint16_t address = (uint16_t)GPIOE->INDR;
+/* ── RunCartWithRAM: RISC-V assembly for minimum bus-service latency. ──────
+ *
+ * Why assembly: this is the steady-state cart ISR used on every MREQ edge,
+ * so it must be as short as possible.  Handover checks are intentionally NOT
+ * in this function; they run only in RunCartWithM1Watch during launch.
+ *
+ * GPIO/peripheral base addresses and offsets (hardcoded — no struct loads):
+ *   GPIOB  0x40010C00  +0x08 INDR  +0x14 BCR
+ *   GPIOD  0x40011400  +0x00 CFGLR +0x08 INDR +0x0C OUTDR
+ *   GPIOE  0x40011800  +0x08 INDR  (address bus)
+ *   EXTI   0x40010400  +0x14 INTFR
+ *     EXTI_INTFR = GPIOB_base + (-0x7EC) = 0x40010414
+ *     GPIOB_BCR  = GPIOB_base + 0x14    = 0x40010C14
+ *
+ * Register allocation (all caller-saved; saved by hardware on ISR entry):
+ *   t1  Z80 address (GPIOE INDR[15:0])
+ *   t2  GPIOB INDR snapshot / scratch
+ *   t3  scratch / comparison value
+ *   t4  data byte / temp
+ *   t5  GPIOD OUTDR preload / WR store address
+ *   t6  GPIOB base  0x40010C00  (kept throughout hot path)
+ *   a0  GPIOD base  0x40011400  (kept throughout hot path)
+ */
+__attribute__((interrupt ("WCH-Interrupt-fast"))) void RunCartWithRAM (void) {
+    __asm__ (
 
-    /* When ROMCS has been released the internal Spectrum ROM owns 0x0000-0x3FFF;
-       the cart must not drive the data bus. Just clear the EXTI flag and exit. */
-    if (s_rom_released) {
-        EXTI->INTFR = sp->IRQLine;
-        return;
-    }
+    /* ── Load fixed bases; read address bus ── */
+    "   li      t6, 0x40010C00          \n" /* GPIOB base */
+    "   li      a0, 0x40011400          \n" /* GPIOD base */
+    "   li      t0, 0x40011808          \n" /* GPIOE INDR address */
+    "   lhu     t1, 0(t0)               \n" /* t1 = address[15:0] */
 
- //    if ((GPIOB->INDR & GPIO_Pin_10) != 0u) {
- //       EXTI->INTFR = EXTI_Line10;
- //       return;
- //   }
+    /* ── Normal path ── */
+    ".Lrca_normal:                      \n"
+    "   la      t0, s_rom_released      \n"
+    "   lhu     t2, 8(t6)               \n" /* GPIOB INDR */
+    "   lw      t3, 0(t0)               \n" /* s_rom_released */
+    "   bnez    t3, .Lrca_exit          \n" /* ROMCS released → just exit */
+    "   andi    t3, t2, 0x20            \n" /* isolate PinRD (bit 5) */
+    "   bnez    t3, .Lrca_qualify      \n" /* RD may still be high at MREQ edge */
 
-     if ((GPIOB->INDR & sp->PinRD) == 0u) { // Check for RD active (active low)
-        if (address < sp->RamBase) {
-            GPIOD->CFGLR = sp->BusOn;
-            GPIOD->OUTDR = (GPIOD->OUTDR & ~sp->DataMask) | g_zx_image[address];
-            while ((GPIOB->INDR & sp->PinRD) == 0u) { }
-            GPIOD->CFGLR = sp->BusOff;
-        } else if (address <= sp->RomLast) {
-            GPIOD->CFGLR = sp->BusOn;
-            GPIOD->OUTDR = (GPIOD->OUTDR & ~sp->DataMask) | sp->ram[address - sp->RamBase];
-            while ((GPIOB->INDR & sp->PinRD) == 0u) { }
-            GPIOD->CFGLR = sp->BusOff;
-        }
-    } else {
-        while (((GPIOB->INDR & sp->PinMREQ) == 0u) && ((GPIOB->INDR & sp->PinWR) != 0u)) { }
+    /* ── Read cycle ── */
+    ".Lrca_read_entry:                  \n"
+    "   lui     t3, 3                   \n" /* t3 = 0x3000 = RamBase */
+    "   bltu    t1, t3, .Lrca_rom       \n" /* addr < 0x3000 → ROM image */
+    "   lui     t3, 4                   \n" /* t3 = 0x4000 */
+    "   bgeu    t1, t3, .Lrca_exit      \n" /* addr >= 0x4000 → out of range */
 
-        if (((GPIOB->INDR & sp->PinMREQ) == 0u) && ((GPIOB->INDR & sp->PinWR) == 0u)) { // Check for delayed WR while MREQ remains active
-            if ((address >= sp->RamBase) && (address <= sp->RomLast)) {
-                GPIOD->CFGLR = sp->BusOff; // Data bus must be input while capturing host writes
-                do {
-                    sp->ram[address - sp->RamBase] = (uint8_t)(GPIOD->INDR & sp->DataMask);
-                } while ((GPIOB->INDR & sp->PinWR) == 0u);
-            }
-        }
-    }
+    /* ── Cart RAM read: 0x3000 ≤ addr ≤ 0x3FFF ── */
+    "   lui     t3, 3                   \n"
+    "   sub     t4, t1, t3              \n" /* t4 = addr - 0x3000 (byte offset) */
+    "   la      t0, state_pointer       \n"
+    "   lhu     t5, 0xC(a0)             \n" /* preload GPIOD OUTDR while pointer loads */
+    "   lw      t0, 0(t0)               \n" /* t0 = ZXCartState* */
+    "   addi    t0, t0, 28              \n" /* &sp->ram[0] */
+    "   add     t0, t0, t4              \n" /* &sp->ram[offset] */
+    "   lbu     t4, 0(t0)               \n" /* t4 = data byte */
+    "   andi    t5, t5, -256            \n" /* clear OUTDR[7:0] */
+    "   or      t5, t5, t4              \n" /* merge data byte */
+    "   sw      t5, 0xC(a0)             \n" /* GPIOD OUTDR = value (still input mode → no glitch) */
+    "   li      t3, 0x33333333          \n"
+    "   sw      t3, 0(a0)               \n" /* GPIOD CFGLR = BusOn → data drives pins */
+    ".Lrca_ram_wait:                    \n"
+    "   lhu     t2, 8(t6)               \n"
+    "   andi    t2, t2, 0x20            \n"
+    "   beqz    t2, .Lrca_ram_wait      \n" /* wait until RD goes high */
+    "   li      t3, 0x44444444          \n"
+    "   sw      t3, 0(a0)               \n" /* GPIOD CFGLR = BusOff (tristate) */
+    "   j       .Lrca_exit              \n"
 
-    EXTI->INTFR = sp->IRQLine; // Clear the interrupt flag for EXTI line 10 to allow the next interrupt to be triggered
+    /* ── ROM image read: addr < 0x3000 ── */
+    ".Lrca_rom:                         \n"
+    "   la      t0, g_zx_image          \n"
+    "   lhu     t5, 0xC(a0)             \n" /* preload GPIOD OUTDR */
+    "   add     t0, t0, t1              \n" /* &g_zx_image[addr] */
+    "   lbu     t4, 0(t0)               \n" /* t4 = data byte */
+    "   andi    t5, t5, -256            \n"
+    "   or      t5, t5, t4              \n"
+    "   sw      t5, 0xC(a0)             \n" /* GPIOD OUTDR */
+    "   li      t3, 0x33333333          \n"
+    "   sw      t3, 0(a0)               \n" /* GPIOD CFGLR = BusOn */
+    ".Lrca_rom_wait:                    \n"
+    "   lhu     t2, 8(t6)               \n"
+    "   andi    t2, t2, 0x20            \n"
+    "   beqz    t2, .Lrca_rom_wait      \n" /* wait until RD goes high */
+    "   li      t3, 0x44444444          \n"
+    "   sw      t3, 0(a0)               \n" /* GPIOD CFGLR = BusOff */
+    "   j       .Lrca_exit              \n"
 
-    return;
+    /* ── Qualify cycle type while MREQ is active ── */
+    ".Lrca_qualify:                     \n"
+    ".Lrca_qualify_wait:                \n"
+    "   lhu     t2, 8(t6)               \n"
+    "   andi    t3, t2, 0x400           \n" /* PinMREQ (bit 10) */
+    "   bnez    t3, .Lrca_exit          \n" /* MREQ de-asserted → ignore */
+    "   andi    t3, t2, 0x20            \n" /* PinRD (bit 5), active low */
+    "   beqz    t3, .Lrca_read_entry    \n" /* it's a read cycle */
+    "   andi    t3, t2, 0x10            \n" /* PinWR (bit 4), active low */
+    "   bnez    t3, .Lrca_qualify_wait  \n" /* wait for RD or WR assertion */
+
+    /* WR asserted while MREQ low → write cycle; check address in cart RAM range */
+    ".Lrca_wr_start:                    \n"
+    "   lui     t3, 3                   \n"
+    "   bltu    t1, t3, .Lrca_exit      \n" /* addr < 0x3000 → ignore */
+    "   lui     t3, 4                   \n"
+    "   bgeu    t1, t3, .Lrca_exit      \n" /* addr >= 0x4000 → ignore */
+    "   lui     t3, 3                   \n"
+    "   sub     t4, t1, t3              \n" /* t4 = addr - 0x3000 */
+    "   la      t0, state_pointer       \n"
+    "   lw      t0, 0(t0)               \n"
+    "   addi    t0, t0, 28              \n"
+    "   add     t5, t0, t4              \n" /* t5 = &sp->ram[offset] */
+    "   li      t3, 0x44444444          \n"
+    "   sw      t3, 0(a0)               \n" /* GPIOD CFGLR = BusOff (input for WR) */
+    ".Lrca_wr_data:                     \n"
+    "   lhu     t2, 8(t6)               \n"
+    "   lhu     t3, 8(a0)               \n" /* GPIOD INDR: Z80 data bus */
+    "   andi    t3, t3, 0xFF            \n"
+    "   sb      t3, 0(t5)               \n" /* sp->ram[offset] = data */
+    "   andi    t2, t2, 0x10            \n" /* PinWR */
+    "   beqz    t2, .Lrca_wr_data       \n" /* loop while WR remains low */
+
+    /* ── Clear EXTI pending flag and return ── */
+    ".Lrca_exit:                        \n"
+    "   addi    t0, t6, -0x7EC          \n" /* t0 = 0x40010C00 - 0x7EC = 0x40010414 = EXTI INTFR */
+    "   li      t3, 0x400               \n" /* EXTI_Line10 */
+    "   sw      t3, 0(t0)               \n"
+    "   mret                            \n"
+
+    ); /* end __asm__ */
 }
 
-/* Variant of RunCartWithRAM with M1-handover detection at the top.  Used
-   only during the .z80 snapshot launch window: ZX_SnapshotCommit swaps the
-   VTF entry to point here, then back to RunCartWithRAM (or releases ROMCS)
-   after the M1 fetch fires.  Kept as a separate function so the normal cart
-   ISR has zero added cost. */
-void RunCartWithM1Watch (void) {
-    struct ZXCartState *sp = state_pointer;
-    uint16_t address = (uint16_t)GPIOE->INDR;
+/* Launch-window ISR in RISC-V asm.
+   Fast path: if no handover match, jump directly to RunCartWithRAM.
+   Slow path: on address match, verify launcher alive marker (0x3FAA=0xAA),
+   then drop ROMCS and signal handover fired. */
+__attribute__((interrupt ("WCH-Interrupt-fast"))) void RunCartWithM1Watch (void) {
+    __asm__ (
+    "   li      t6, 0x40010C00          \n" /* GPIOB base */
+    "   li      t0, 0x40011808          \n" /* GPIOE INDR address */
+    "   lhu     t1, 0(t0)               \n" /* t1 = address */
 
-    /* Record every MREQ event during the launch window, skipping RFSH cycles
-       (M1=1, RD=1, WR=1 = ctrl bits all 1 = 0x07) to halve trace usage:
-       each Z80 instruction produces one M1 MREQ and one RFSH MREQ; skipping
-       RFSH doubles the number of useful instructions visible in the buffer.
-       Data is sampled at MREQ falling edge: reliable for WR (Z80-driven);
-       for ROM/RAM reads the MCU hasn't driven GPIOD yet so data = 0xFF. */
-    if (!s_trace_full) {
-        uint16_t bport_entry = (uint16_t)GPIOB->INDR;
-        uint8_t ctrl = (uint8_t)(
-            ((bport_entry & ZX_PIN_M1)  ? 0x01u : 0u) |
-            ((bport_entry & sp->PinRD)  ? 0x02u : 0u) |
-            ((bport_entry & sp->PinWR)  ? 0x04u : 0u));
-        /* 0x07 = M1 inactive + RD inactive + WR inactive = RFSH cycle */
-        if (ctrl != 0x07u) {
-            uint16_t th = s_trace_head;
-            s_trace[th].addr = address;
-            s_trace[th].data = (uint8_t)(GPIOD->INDR & 0xFFu);
-            s_trace[th].ctrl = ctrl;
-            s_trace_head = (uint16_t)(th + 1u);
-            if (s_trace_head >= ZX_TRACE_DEPTH) { s_trace_full = 1u; }
-        }
-    }
+     /* Only attempt handover on opcode fetch timing: M1 low.
+         EXTI triggers on MREQ falling edge, which can precede RD going low. */
+    "   lhu     t2, 8(t6)               \n" /* GPIOB INDR */
+    "   andi    t3, t2, 0x200           \n" /* PinM1 (bit 9), active low */
+    "   bnez    t3, .Lrwm_to_ram        \n"
 
-    /* Match on address alone, not M1.  Reasoning: while the trampoline is
-       running, the Z80 only accesses cart RAM (0x3F90..0x3FFF) and a few
-       I/O ports; the cart address bus never visits handover_addr.  The
-       first time we see handover_addr on the bus is the opcode fetch
-       triggered by `JP user_pc` at the end of the trampoline.  Sampling M1
-       synchronously was racing the ~285ns M1-low window vs EXTI latency
-       and we'd miss the only fetch that ever lands on this address.
-       Guard: only match if address is not 0xFFFF (the "unused" sentinel
-       value for handover_addr_b would otherwise fire on RFSH cycles when
-       the R register wraps to 0x7F and the upper address bits are all 1). */
-    if (((address == s_handover_addr) ||
-         ((s_handover_addr_b != 0xFFFFu) && (address == s_handover_addr_b)))) {
-        GPIO_ResetBits (GPIOB, GPIO_Pin_3);   /* ROMCS LOW immediately */
-        s_rom_released = 1;
-        s_handover_armed = 0;
-        s_handover_fired_addr = address;
-        s_handover_fired = 1;
-        EXTI->INTFR = sp->IRQLine;
-        return;
-    }
+    /* If handover is not armed, use normal fast cart service immediately. */
+    "   la      t2, s_handover_armed    \n"
+    "   lw      t3, 0(t2)               \n"
+    "   beqz    t3, .Lrwm_to_ram        \n"
 
-    if (s_rom_released) {
-        EXTI->INTFR = sp->IRQLine;
-        return;
-    }
+    /* Match primary handover address. */
+    "   la      t2, s_handover_addr     \n"
+    "   lhu     t3, 0(t2)               \n"
+    "   beq     t1, t3, .Lrwm_check_alive \n"
 
-    if ((GPIOB->INDR & sp->PinRD) == 0u) {
-        if (address < sp->RamBase) {
-            GPIOD->CFGLR = sp->BusOn;
-            GPIOD->OUTDR = (GPIOD->OUTDR & ~sp->DataMask) | g_zx_image[address];
-            while ((GPIOB->INDR & sp->PinRD) == 0u) { }
-            GPIOD->CFGLR = sp->BusOff;
-        } else if (address <= sp->RomLast) {
-            GPIOD->CFGLR = sp->BusOn;
-            GPIOD->OUTDR = (GPIOD->OUTDR & ~sp->DataMask) | sp->ram[address - sp->RamBase];
-            while ((GPIOB->INDR & sp->PinRD) == 0u) { }
-            GPIOD->CFGLR = sp->BusOff;
-        }
-    } else {
-        while (((GPIOB->INDR & sp->PinMREQ) == 0u) && ((GPIOB->INDR & sp->PinWR) != 0u)) { }
-        if (((GPIOB->INDR & sp->PinMREQ) == 0u) && ((GPIOB->INDR & sp->PinWR) == 0u)) {
-            if ((address >= sp->RamBase) && (address <= sp->RomLast)) {
-                GPIOD->CFGLR = sp->BusOff;
-                do {
-                    sp->ram[address - sp->RamBase] = (uint8_t)(GPIOD->INDR & sp->DataMask);
-                } while ((GPIOB->INDR & sp->PinWR) == 0u);
-            }
-        }
-    }
+    /* Match optional secondary handover address. */
+    "   la      t2, s_handover_addr_b   \n"
+    "   lhu     t3, 0(t2)               \n"
+    "   li      t4, 0xFFFF              \n"
+    "   beq     t3, t4, .Lrwm_to_ram    \n"
+    "   bne     t1, t3, .Lrwm_to_ram    \n"
 
-    EXTI->INTFR = sp->IRQLine;
-    return;
+    /* Address matched. Require launcher alive marker before handover. */
+    ".Lrwm_check_alive:                 \n"
+    "   la      t0, state_pointer       \n"
+    "   lw      t0, 0(t0)               \n"
+    "   lui     t3, 1                   \n" /* 0x1000 */
+    "   add     t0, t0, t3              \n"
+    "   lbu     t4, -58(t0)             \n" /* sp->ram[0x0FAA] */
+    "   li      t3, 0xAA                \n"
+    "   bne     t4, t3, .Lrwm_to_ram    \n"
+
+    /* Handover fire: ROMCS LOW + flags + EXTI clear + return. */
+    "   addi    t0, t6, 0x14            \n" /* GPIOB BCR */
+    "   li      t3, 8                   \n" /* GPIO_Pin_3 */
+    "   sw      t3, 0(t0)               \n"
+    "   la      t0, s_rom_released      \n"
+    "   li      t3, 1                   \n"
+    "   sw      t3, 0(t0)               \n"
+    "   la      t0, s_handover_armed    \n"
+    "   sw      zero, 0(t0)             \n"
+    "   la      t0, s_handover_fired_addr \n"
+    "   sh      t1, 0(t0)               \n"
+    "   la      t0, s_handover_fired    \n"
+    "   li      t3, 1                   \n"
+    "   sw      t3, 0(t0)               \n"
+    "   addi    t0, t6, -0x7EC          \n" /* EXTI INTFR */
+    "   li      t3, 0x400               \n" /* EXTI_Line10 */
+    "   sw      t3, 0(t0)               \n"
+    "   mret                            \n"
+
+    /* Normal service: jump to the steady-state fast ISR (ends with mret). */
+    ".Lrwm_to_ram:                      \n"
+    "   j       RunCartWithRAM          \n"
+    );
 }
 
 /* Pure-observer ISR.  Triggered on EXTI line 10 (MREQ falling edge).
@@ -1021,13 +1089,16 @@ int ZX_LaunchZ80 (uint16_t start_addr) {
 
     if (state_pointer == NULL) { return 0; }
 
+    /* Launch must begin with cart ROM actively serving reads. */
+    ZX_RomcsAssert();
+
     /* Clean Spectrum register state.  Initialisation matches what the ROM
        produces after a clean RESET; enough for most standalone code blocks.
        R_comp = (0 - 12) & 0x7F = 0x74 (12 M1 cycles from LD R,A to JP). */
     __builtin_memset (regblock, 0, ZX_LAUNCHER_REGBLOCK_LEN);
     regblock[10] = 0x3Au; regblock[11] = 0x5Cu;  /* IY = 0x5C3A */
     regblock[13] = 0x3Fu;                         /* I = 0x3F */
-    regblock[14] = 7u;                            /* border = 7 (white) */
+    regblock[14] = 4u;                            /* border = 4 (green) */
     regblock[15] = 0x74u;                         /* R_comp = (0-12)&0x7F */
     regblock[24] = 0x40u; regblock[25] = 0xFFu;  /* SP = 0xFF40 */
 
@@ -1080,13 +1151,16 @@ int ZX_SnapshotEnter (uint16_t tramp_addr, uint16_t alive_addr,
 
     if (state_pointer == NULL) { return 0; }
 
+    /* Ensure launcher/trigger is visible to Z80 even after prior romcs off. */
+    ZX_RomcsAssert();
+
     /* Neutral regblock: all registers zero except IY=0x5C3A, I=0x3F,
        SP=0xFF40, border=7, R_comp for 12 M1 cycles.  Good enough for the
        test trampolines in launch_test.c which restore their own state. */
     __builtin_memset (regblock, 0, ZX_LAUNCHER_REGBLOCK_LEN);
     regblock[10] = 0x3Au; regblock[11] = 0x5Cu;  /* IY = 0x5C3A */
     regblock[13] = 0x3Fu;                         /* I = 0x3F */
-    regblock[14] = 7u;                            /* border */
+    regblock[14] = 4u;                            /* border = green */
     regblock[15] = 0x74u;                         /* R_comp = (0-12)&0x7F */
     regblock[24] = 0x40u; regblock[25] = 0xFFu;  /* SP = 0xFF40 */
 
@@ -1137,28 +1211,33 @@ int ZX_SnapshotCommitDual (uint16_t handover_addr_a,
                            uint8_t go_value,
                            uint32_t wait_ms) {
     uint32_t waited = 0u;
+    uint32_t spin = 0u;
     int go_in_cart = 0;
+    int direct_release_mode = 0;
+    int watch_armed = 0;
+    uint8_t go_readback = 0xFFu;
+    uint8_t alive = 0u;
 
     s_handover_fired = 0;
     s_handover_fired_addr = 0xFFFFu;
     s_handover_addr  = handover_addr_a;
     s_handover_addr_b = handover_addr_b;
-    /* Memory barrier so the ISR sees both writes in order. */
-    __asm volatile ("" ::: "memory");
-    s_handover_armed = 1;
 
-    /* Swap the cart ISR to the M1-watching variant.  This adds the address
-       compare + M1 sample to the hot path only for the brief launch window;
-       the normal cart ISR (RunCartWithRAM) has zero added cost. */
+    /* Fallback path for RAM-resident snapshot entry points (>=0x4000) without
+       secondary low-ROM watch address: launch via trigger + alive poll, then
+       release ROMCS directly. This avoids RunCartWithM1Watch vector swapping. */
+    direct_release_mode = ((handover_addr_b == 0xFFFFu) &&
+                           (handover_addr_a >= 0x4000u));
+    s_handover_armed = 0;
+    /* Phase 1 always uses steady ISR so zxprog can continue polling normally. */
     SetVTFIRQ ((u32)RunCartWithRAM, EXTI15_10_IRQn, 0, ENABLE);
 
     go_in_cart = ((go_addr >= state_pointer->RamBase) &&
                   (go_addr <= state_pointer->RomLast));
 
-    /* Arm bus trace immediately before trigger so the trace buffer captures
-       the full launcher sequence: trigger read, alive write, register POPs,
-       launcher tail M1 fetches, and the final JP user_pc M1 (handover). */
-    ZX_BusTraceArm ();
+     /* Do not arm the trace buffer here: launch-window tracing in the ISR adds
+         enough latency to break tight RD service on some games.  Keep the M1
+         watch path as close to RunCartWithRAM as possible. */
 
     /* Release trampoline spin via the appropriate backing store. */
     if (go_in_cart) {
@@ -1169,6 +1248,9 @@ int ZX_SnapshotCommitDual (uint16_t handover_addr_a,
             SetVTFIRQ ((u32)RunCartWithRAM, EXTI15_10_IRQn, 0, ENABLE);
             return 0;
         }
+        (void)ZX_CartRamReadBlock (go_addr, &go_readback, 1u);
+        printf ("snap: trigger %04X <= %02X (rb=%02X)\r\n",
+                (unsigned)go_addr, (unsigned)go_value, (unsigned)go_readback);
     } else {
         if (!ZX_BusAcquire()) {
             s_handover_armed = 0;
@@ -1178,27 +1260,108 @@ int ZX_SnapshotCommitDual (uint16_t handover_addr_a,
             return 0;
         }
         (void)ZX_BusWriteCycle (go_addr, go_value);
+        (void)ZX_BusReadCycle (go_addr, &go_readback);
         ZX_BusRelease();
+        printf ("snap: trigger %04X <= %02X (rb=%02X)\r\n",
+                (unsigned)go_addr, (unsigned)go_value, (unsigned)go_readback);
     }
 
-    /* Wait for ISR to fire on the M1 fetch.  At 3.5 MHz the trampoline
-       (~80 T-states from go-read to JP target) finishes in ~30us. */
-    while ((waited < wait_ms) && !s_handover_fired) {
-        Delay_Ms (1u);
-        ++waited;
+    if (direct_release_mode || (handover_addr_a < 0x4000u)) {
+        /* Direct-release path:
+           - RAM entry (>=0x4000): no ROM fetch handover needed.
+           - Low-ROM entry (<0x4000): require launcher entry marker, then
+             release promptly after a tiny settle delay. */
+        for (spin = 0u; spin < 80000u; ++spin) {
+            if (!ZX_CartRamReadBlock (ZX_LAUNCHER_ALIVE_ADDR, &alive, 1u)) {
+                continue;
+            }
+            if (alive == 0xAAu) {
+                break;
+            }
+        }
+        while ((alive != 0xAAu) && (waited < wait_ms)) {
+            Delay_Ms (1u);
+            ++waited;
+            if (!ZX_CartRamReadBlock (ZX_LAUNCHER_ALIVE_ADDR, &alive, 1u)) {
+                continue;
+            }
+        }
+        if (alive != 0xAAu) {
+            printf ("snap: launcher alive did not appear within %lums\r\n",
+                    (unsigned long)wait_ms);
+            s_handover_armed = 0;
+            s_handover_addr = 0xFFFFu;
+            s_handover_addr_b = 0xFFFFu;
+            SetVTFIRQ ((u32)RunCartWithRAM, EXTI15_10_IRQn, 0, ENABLE);
+            return 0;
+        }
+        if (handover_addr_a < 0x4000u) {
+            /* Let zx_launcher/tail complete before cutting ROMCS. */
+            Delay_Us (200u);
+        }
+        s_handover_fired = 1;
+        s_handover_fired_addr = handover_addr_a;
+    } else {
+        /* High-ROM precise handover path: arm M1 watch after launcher stage marker. */
+        for (spin = 0u; spin < 80000u; ++spin) {
+            if (!ZX_CartRamReadBlock (ZX_LAUNCHER_ALIVE_ADDR, &alive, 1u)) {
+                continue;
+            }
+            if ((alive == 0x5Au) || (alive == 0xAAu)) {
+                __asm volatile ("" ::: "memory");
+                s_handover_armed = 1;
+                SetVTFIRQ ((u32)RunCartWithM1Watch, EXTI15_10_IRQn, 0, ENABLE);
+                watch_armed = 1;
+                break;
+            }
+        }
+
+        waited = 0u;
+        while (!watch_armed && (waited < wait_ms)) {
+            Delay_Ms (1u);
+            ++waited;
+            if (!ZX_CartRamReadBlock (ZX_LAUNCHER_ALIVE_ADDR, &alive, 1u)) {
+                continue;
+            }
+            if ((alive == 0x5Au) || (alive == 0xAAu)) {
+                __asm volatile ("" ::: "memory");
+                s_handover_armed = 1;
+                SetVTFIRQ ((u32)RunCartWithM1Watch, EXTI15_10_IRQn, 0, ENABLE);
+                watch_armed = 1;
+                break;
+            }
+        }
+
+        if (!watch_armed) {
+            printf ("snap: launcher stage marker missing (alive=%02X)\r\n",
+                    (unsigned)alive);
+            s_handover_armed = 0;
+            s_handover_addr = 0xFFFFu;
+            s_handover_addr_b = 0xFFFFu;
+            SetVTFIRQ ((u32)RunCartWithRAM, EXTI15_10_IRQn, 0, ENABLE);
+            return 0;
+        }
+
+        waited = 0u;
+        while ((waited < wait_ms) && !s_handover_fired) {
+            Delay_Ms (1u);
+            ++waited;
+        }
+
+        if (!s_handover_fired) {
+            printf ("snap: M1 handover did not fire within %lums\r\n",
+                    (unsigned long)wait_ms);
+            s_handover_armed = 0;
+            s_handover_addr = 0xFFFFu;
+            s_handover_addr_b = 0xFFFFu;
+            SetVTFIRQ ((u32)RunCartWithRAM, EXTI15_10_IRQn, 0, ENABLE);
+            return 0;
+        }
     }
 
-    if (!s_handover_fired) {
-        printf ("snap: M1 handover did not fire within %lums\r\n",
-                (unsigned long)wait_ms);
-        s_handover_armed = 0;
-        /* Fall through and force release anyway — Z80 may still be running
-           if the trampoline took an unexpected path; tristating everything
-           lets the user reset. */
-    }
-
-    /* Full tristate of all cart-edge signals (same as `romcs off`). */
-    Delay_Us(200);
+     /* Full tristate of all cart-edge signals (same as `romcs off`).
+         Release immediately once handover is considered fired; waiting here
+         lets Z80 execute too far while cart is still mapped. */
     ZX_RomcsRelease();
 
     s_handover_addr = 0xFFFFu;

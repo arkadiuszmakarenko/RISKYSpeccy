@@ -12,8 +12,9 @@
  * causing the launcher to fail with spurious addresses in the trace.
  *
  * Border colour sequence (visible on the Spectrum display):
- *   CYAN   (5)  startup complete, main poll loop running
- *   YELLOW (6)  trigger 0x55 detected — about to call launcher
+ *   YELLOW (6)  startup complete, main poll loop running
+ *   <game> (*)  first WCMD received — game data loading, border from regblock[14]
+ *   GREEN  (4)  trigger 0x55 detected — game launch starting
  *   WHITE  (7)  launcher entered, alive byte written
  *   <snap> (*)  snapshot's own border colour restored from regblock
  *
@@ -63,6 +64,7 @@
 /* Launch trigger: CH32 writes LAUNCH_TRIGGER_GO here */
 #define LAUNCH_TRIGGER_ADDR  0x3F10u
 #define LAUNCH_TRIGGER_GO    0x55u
+#define LAUNCHER_ALIVE_ADDR  0x3FAAu
 
 #define WCMD_SEQ     (*((volatile unsigned char *)WCMD_SEQ_ADDR))
 #define WCMD_DONE    (*((volatile unsigned char *)WCMD_DONE_ADDR))
@@ -81,6 +83,7 @@
 #define RCMD_LEN     (*((volatile unsigned char *)RCMD_LEN_ADDR))
 
 #define LAUNCH_TRIGGER  (*((volatile unsigned char *)LAUNCH_TRIGGER_ADDR))
+#define LAUNCHER_ALIVE  (*((volatile unsigned char *)LAUNCHER_ALIVE_ADDR))
 
 /* BSS section — placed at 0x3F00 by --data-loc 0x3F00.
    main() re-syncs these from cart RAM before the poll loop,
@@ -368,6 +371,9 @@ static void wcmd_poll(void)
 
         WCMD_DONE = seq;
         wcmd_last_seq = seq;
+
+        /* Border = game colour from regblock[14] at 0x3F9E: "data loading" */
+        zx_border(*((volatile unsigned char *)0x3F9Eu));
     }
 }
 
@@ -399,6 +405,15 @@ void nmi_handler_c(void)
     wcmd_poll();
     rcmd_poll();
     kbd_poll_publish();
+
+    /* Fallback launch path: if main loop is stalled/not polling, an MPU-fired
+       NMI can still consume the trigger and enter the launcher. */
+    if (LAUNCH_TRIGGER == LAUNCH_TRIGGER_GO) {
+        LAUNCHER_ALIVE = 0x5Au;
+        LAUNCH_TRIGGER = 0u;
+        ULA_PORT = GREEN;
+        zx_launcher();
+    }
 }
 
 /* ---- Main poll loop ---- */
@@ -406,6 +421,8 @@ void nmi_handler_c(void)
    Border is already CYAN (set by startup). */
 void main(void)
 {
+    unsigned char launch_seen_nonzero = 0u;
+
     zx_startup_clear();
 
     /* Sync sequence numbers to current cart RAM state so we don't
@@ -422,14 +439,26 @@ void main(void)
     kbd_prev7 = kbd_row7_read();
 
     for (;;) {
+        unsigned char trig;
+
         wcmd_poll();
         rcmd_poll();
         kbd_poll_publish();
 
-        if (LAUNCH_TRIGGER == LAUNCH_TRIGGER_GO) {
-            /* Border: YELLOW = trigger received, about to launch */
-            ULA_PORT = YELLOW;
-            /* _zx_launcher (in crt0.s) never returns:
+        trig = LAUNCH_TRIGGER;
+        if ((trig != 0u) && (launch_seen_nonzero == 0u)) {
+            /* First non-zero trigger byte seen: mark RED once for diagnostics. */
+            ULA_PORT = RED;
+            launch_seen_nonzero = 1u;
+        }
+
+        if (trig == LAUNCH_TRIGGER_GO) {
+                /* Mark trigger consumed before entering launcher path. */
+                LAUNCHER_ALIVE = 0x5Au;
+                LAUNCH_TRIGGER = 0u;
+                /* Border: GREEN = trigger received, game launch starting. */
+                ULA_PORT = GREEN;
+                /* _zx_launcher (in crt0.s) never returns:
                it sets border WHITE, writes alive byte, restores all Z80
                registers from regblock at 0x3F90, then JPs to tail at 0x3FF0. */
             zx_launcher();

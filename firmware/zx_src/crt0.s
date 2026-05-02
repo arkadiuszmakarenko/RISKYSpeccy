@@ -11,8 +11,9 @@
 ;   0x0066  JP _nmi_wrapper   NMI dispatch to full C-callable wrapper
 ;
 ; Border colour sequence visible on a real Spectrum display:
-;   CYAN  (5) — zxprog started, waiting for launch trigger
-;   YELLOW(6) — trigger 0x55 seen in main poll loop  (set before calling launcher)
+;   YELLOW(6) — zxprog started, waiting for launch trigger
+;   <game>(*)  — first WCMD received, game data loading (border from regblock[14])
+;   GREEN (4) — trigger 0x55 seen, game launch starting
 ;   WHITE (7) — launcher entered, alive byte written
 ;   <snap>    — snapshot's own border colour restored from regblock
 
@@ -55,8 +56,8 @@ _startup::
         di
         ld      sp, #0x3EFE         ; stack grows down from 0x3EFE
 
-        ; Border = CYAN (5): "zxprog alive, waiting for trigger"
-        ld      a, #5
+        ; Border = YELLOW (6): "zxprog alive, waiting for trigger"
+        ld      a, #6
         out     (0xFE), a
 
         ei

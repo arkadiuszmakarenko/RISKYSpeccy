@@ -18,17 +18,17 @@ DEF l__VECTOR1 0x3
 DEF l__VECTOR2 0x3
 DEF l__DATA 0xA
 DEF s__CODE 0x69
-DEF l__CODE 0x66C
+DEF l__CODE 0x6B8
 DEF s__DATA 0x3F00
 DEF s__GSFINAL 0x3F0A
 DEF s__GSINIT 0x3F0A
 DEF s__HOME 0x3F0A
 DEF s__INITIALIZED 0x3F0A
 DEF s__INITIALIZER 0x3F0A
-DEF _nmi_handler_c 0x615
-DEF _main 0x61E
-DEF _startup 0x678
-DEF _halt 0x684
-DEF _nmi_wrapper 0x688
-DEF _zx_launcher 0x6A9
+DEF _nmi_handler_c 0x61C
+DEF _main 0x63B
+DEF _startup 0x6C4
+DEF _halt 0x6D0
+DEF _nmi_wrapper 0x6D4
+DEF _zx_launcher 0x6F5
 LOAD zxprog.ihx

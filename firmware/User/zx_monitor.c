@@ -70,6 +70,7 @@ static uint8_t s_term_csi_building = 0u;
 static uint8_t s_term_csi_value = 0u;
 static char s_browser_files[ZX_BROWSER_MAX_FILES][ZX_BROWSER_NAME_MAX];
 static uint8_t s_browser_count = 0u;
+static char s_z80select_pending[128];  /* path chosen by selector; empty = cancelled */
 
 static const uint8_t s_font4x7_chars[] =
     " 0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ-.:/_";
@@ -999,6 +1000,8 @@ static void ZX_CommandZ80Select (const char *path) {
     uint8_t selected = 0u;
     char full_path[128];
 
+    s_z80select_pending[0] = '\0';  /* clear result from any previous run */
+
     if (!ZX_BrowserLoadFiles (path)) {
         return;
     }
@@ -1076,9 +1079,10 @@ static void ZX_CommandZ80Select (const char *path) {
         }
         if (key == '\n') {
             ZX_BrowserBuildPath (full_path, sizeof (full_path), path, s_browser_files[selected]);
-            printf("z80select: running %s\r\n", full_path);
-            (void)Z80_LoadAndRun (full_path);
-            return;
+            printf("z80select: selected %s\r\n", full_path);
+            strncpy (s_z80select_pending, full_path, sizeof (s_z80select_pending) - 1u);
+            s_z80select_pending[sizeof (s_z80select_pending) - 1u] = '\0';
+            return;  /* exit selector fully before launching */
         }
     }
 }
@@ -2304,6 +2308,10 @@ static void ZX_ExecuteCommand (char *line) {
     if (ZX_StrIeq (cmd, "z80select")) {
         a0 = strtok (NULL, " \t");
         ZX_CommandZ80Select (a0);
+        if (s_z80select_pending[0] != '\0') {
+            printf ("z80select: launching %s\r\n", s_z80select_pending);
+            (void)Z80_LoadAndRun (s_z80select_pending);
+        }
         return;
     }
 
@@ -2346,6 +2354,10 @@ void ZX_Monitor_Init (void) {
 void ZX_Monitor_AutoStartZ80Select (void) {
     printf("\r\nAuto-start: z80select\r\n");
     ZX_CommandZ80Select (NULL);
+    if (s_z80select_pending[0] != '\0') {
+        printf("z80select: launching %s\r\n", s_z80select_pending);
+        (void)Z80_LoadAndRun (s_z80select_pending);
+    }
     printf("> ");
 }
 
