@@ -5,7 +5,8 @@
  *  Then stage the launcher in cart RAM (shared with Z80 via ROMCS window):
  *
  *      Regblock (26 bytes at 0x3F80):  all CPU registers
- *      Launcher tail (6 bytes at 0x3FF0):  IM x / EI-or-NOP / JP user_pc
+ *      Launcher tail (11 bytes at 0x3FF0):
+ *        IM x / EI-or-NOP / LD A,0xC3 / LD (0x3FAB),A / JP user_pc
  *
  *  zxprog's polling loop detects the launch trigger (0x55 at 0x3F10) and
  *  calls zx_launcher(), which restores all registers from the regblock,
@@ -30,10 +31,12 @@
 
 #define Z80L_REGBLOCK_ADDR       0x3F90u   /* 26-byte register block       */
 #define Z80L_REGBLOCK_LEN        26u
-/* Tail is 14 bytes (debug): LD A,3/OUT + IM + EI/NOP + LD A,4/OUT + JP */
-#define Z80L_LAUNCHER_TAIL_ADDR  0x3FF0u   /* 14-byte launcher tail (debug) */
-#define Z80L_LAUNCHER_TAIL_LEN   6u
+/* Tail writes a phase marker before JP user_pc for deterministic ROMCS off. */
+#define Z80L_LAUNCHER_TAIL_ADDR  0x3FF0u
+#define Z80L_LAUNCHER_TAIL_LEN   11u
 #define Z80L_LAUNCHER_ALIVE_ADDR 0x3FAAu   /* alive marker (0xAA on entry) */
+#define Z80L_LAUNCHER_PHASE_ADDR 0x3FABu   /* tail marker before JP user_pc */
+#define Z80L_LAUNCHER_PHASE_GO   0xC3u
 #define Z80L_LAUNCH_TRIGGER_ADDR 0x3F10u   /* trigger: CH32 writes 0x55    */
 #define Z80L_LAUNCH_TRIGGER_GO   0x55u
 
@@ -353,16 +356,23 @@ int Z80_LoadAndRun (const char *path) {
     printf ("z80: body streamed (%lu bytes via BUSREQ)\r\n",
             (unsigned long)out.total);
 
-    /* Launcher tail at 0x3FF0 (6 bytes):
-         ED / IM_byte   — set interrupt mode
-         EI or NOP      — re-enable interrupts (or skip if IFF1=0)
-         C3 / lo / hi   — JP user_pc */
+    /* Launcher tail at 0x3FF0 (11 bytes):
+       ED / IM_byte      - set interrupt mode
+       EI or NOP         - re-enable interrupts (or skip if IFF1=0)
+       3E C3             - LD A,0xC3
+       32 AB 3F          - LD (0x3FAB),A (tail reached marker)
+       C3 / lo / hi      - JP user_pc */
     tail[0] = 0xEDu;
     tail[1] = z80_im_byte (h.im);
-    tail[2] = (h.iff1 != 0u) ? 0xFBu : 0x00u;        /* EI or NOP */
-    tail[3] = 0xC3u;                                  /* JP        */
-    tail[4] = (uint8_t)(h.pc & 0xFFu);
-    tail[5] = (uint8_t)(h.pc >> 8);
+    tail[2] = (h.iff1 != 0u) ? 0xFBu : 0x00u;
+    tail[3] = 0x3Eu;
+    tail[4] = Z80L_LAUNCHER_PHASE_GO;
+    tail[5] = 0x32u;
+    tail[6] = (uint8_t)(Z80L_LAUNCHER_PHASE_ADDR & 0xFFu);
+    tail[7] = (uint8_t)(Z80L_LAUNCHER_PHASE_ADDR >> 8);
+    tail[8] = 0xC3u;
+    tail[9] = (uint8_t)(h.pc & 0xFFu);
+    tail[10] = (uint8_t)(h.pc >> 8);
     if (!ZX_CartRamWriteBlock (Z80L_LAUNCHER_TAIL_ADDR, tail,
                                Z80L_LAUNCHER_TAIL_LEN)) {
         printf ("z80: launcher tail write failed\r\n");
@@ -377,10 +387,11 @@ int Z80_LoadAndRun (const char *path) {
         return Z80L_ERR_LOAD;
     }
 
-    /* Pre-clear alive marker; launcher writes 0xAA there on entry. */
+    /* Pre-clear markers used by commit-side handover checks. */
     {
         uint8_t zero = 0u;
         (void)ZX_CartRamWriteBlock (Z80L_LAUNCHER_ALIVE_ADDR, &zero, 1u);
+        (void)ZX_CartRamWriteBlock (Z80L_LAUNCHER_PHASE_ADDR, &zero, 1u);
     }
 
     /* Pre-launch diagnostics. */
@@ -434,10 +445,10 @@ int Z80_LoadAndRun (const char *path) {
                 (unsigned)ZX_SnapshotHandoverFiredAddr (), (unsigned)alive);
     }
 
-    /* Dump the launch-window trace captured by RunCartWithM1Watch.
-       This shows: trigger RD at 3F10, alive WR at 3F9A (=AA), register
-       POPs from 3F80..3F99, tail M1 fetches at 3FF0..3FF3, and the
-       final JP user_pc M1 that fired the handover. */
+     /* Dump the launch-window trace captured by RunCartWithM1Watch.
+         This shows: trigger RD at 3F10, alive WR at 3F9A (=AA), register
+         POPs from 3F80..3F99, tail fetches in 3FF0..3FFA, and the
+         final JP user_pc M1 that fired the handover (high-ROM mode). */
     printf ("z80: --- launch window trace ---\r\n");
     ZX_BusTraceDump ();
 

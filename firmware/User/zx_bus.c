@@ -1076,6 +1076,8 @@ int ZX_RomcsIsReleased (void) {
 #define ZX_LAUNCHER_TAIL_ADDR        0x3FF0u
 #define ZX_LAUNCHER_TAIL_LEN         6u
 #define ZX_LAUNCHER_ALIVE_ADDR       0x3FAAu
+#define ZX_LAUNCHER_PHASE_ADDR       0x3FABu
+#define ZX_LAUNCHER_PHASE_READY      0xC3u
 #define ZX_LAUNCH_TRIGGER_ADDR       0x3F10u
 #define ZX_LAUNCH_TRIGGER_GO         0x55u
 
@@ -1211,12 +1213,15 @@ int ZX_SnapshotCommitDual (uint16_t handover_addr_a,
                            uint8_t go_value,
                            uint32_t wait_ms) {
     uint32_t waited = 0u;
+    uint32_t waited_us = 0u;
     uint32_t spin = 0u;
     int go_in_cart = 0;
     int direct_release_mode = 0;
+    int low_rom_mode = 0;
     int watch_armed = 0;
     uint8_t go_readback = 0xFFu;
     uint8_t alive = 0u;
+    uint8_t phase = 0u;
 
     s_handover_fired = 0;
     s_handover_fired_addr = 0xFFFFu;
@@ -1228,6 +1233,7 @@ int ZX_SnapshotCommitDual (uint16_t handover_addr_a,
        release ROMCS directly. This avoids RunCartWithM1Watch vector swapping. */
     direct_release_mode = ((handover_addr_b == 0xFFFFu) &&
                            (handover_addr_a >= 0x4000u));
+     low_rom_mode = (handover_addr_a < 0x4000u) ? 1 : 0;
     s_handover_armed = 0;
     /* Phase 1 always uses steady ISR so zxprog can continue polling normally. */
     SetVTFIRQ ((u32)RunCartWithRAM, EXTI15_10_IRQn, 0, ENABLE);
@@ -1266,11 +1272,11 @@ int ZX_SnapshotCommitDual (uint16_t handover_addr_a,
                 (unsigned)go_addr, (unsigned)go_value, (unsigned)go_readback);
     }
 
-    if (direct_release_mode || (handover_addr_a < 0x4000u)) {
+        if (direct_release_mode || low_rom_mode) {
         /* Direct-release path:
            - RAM entry (>=0x4000): no ROM fetch handover needed.
-           - Low-ROM entry (<0x4000): require launcher entry marker, then
-             release promptly after a tiny settle delay. */
+                     - Low-ROM entry (<0x4000): require launcher entry marker and
+                         tail marker, then release promptly. */
         for (spin = 0u; spin < 80000u; ++spin) {
             if (!ZX_CartRamReadBlock (ZX_LAUNCHER_ALIVE_ADDR, &alive, 1u)) {
                 continue;
@@ -1295,9 +1301,35 @@ int ZX_SnapshotCommitDual (uint16_t handover_addr_a,
             SetVTFIRQ ((u32)RunCartWithRAM, EXTI15_10_IRQn, 0, ENABLE);
             return 0;
         }
-        if (handover_addr_a < 0x4000u) {
-            /* Let zx_launcher/tail complete before cutting ROMCS. */
-            Delay_Us (200u);
+        if (low_rom_mode) {
+            waited_us = 0u;
+            for (spin = 0u; spin < 80000u; ++spin) {
+                if (!ZX_CartRamReadBlock (ZX_LAUNCHER_PHASE_ADDR, &phase, 1u)) {
+                    continue;
+                }
+                if (phase == ZX_LAUNCHER_PHASE_READY) {
+                    break;
+                }
+            }
+            while ((phase != ZX_LAUNCHER_PHASE_READY) &&
+                   (waited_us < (wait_ms * 1000u))) {
+                Delay_Us (50u);
+                waited_us += 50u;
+                if (!ZX_CartRamReadBlock (ZX_LAUNCHER_PHASE_ADDR, &phase, 1u)) {
+                    continue;
+                }
+            }
+            if (phase != ZX_LAUNCHER_PHASE_READY) {
+                printf ("snap: low-ROM tail marker missing (alive=%02X phase=%02X)\r\n",
+                        (unsigned)alive, (unsigned)phase);
+                s_handover_armed = 0;
+                s_handover_addr = 0xFFFFu;
+                s_handover_addr_b = 0xFFFFu;
+                SetVTFIRQ ((u32)RunCartWithRAM, EXTI15_10_IRQn, 0, ENABLE);
+                return 0;
+            }
+            /* Tail marker is written immediately before JP user_pc. */
+            Delay_Us (80u);
         }
         s_handover_fired = 1;
         s_handover_fired_addr = handover_addr_a;
