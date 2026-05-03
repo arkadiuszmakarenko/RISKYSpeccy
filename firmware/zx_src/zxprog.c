@@ -61,11 +61,6 @@
 #define RCMD_BUF_ADDR    0x3F40u
 #define RCMD_MAX_LEN     64u
 
-/* Launch trigger: CH32 writes LAUNCH_TRIGGER_GO here */
-#define LAUNCH_TRIGGER_ADDR  0x3F10u
-#define LAUNCH_TRIGGER_GO    0x55u
-#define LAUNCHER_ALIVE_ADDR  0x3FAAu
-
 #define WCMD_SEQ     (*((volatile unsigned char *)WCMD_SEQ_ADDR))
 #define WCMD_DONE    (*((volatile unsigned char *)WCMD_DONE_ADDR))
 #define WCMD_DST_LO  (*((volatile unsigned char *)WCMD_DST_LO_ADDR))
@@ -82,14 +77,7 @@
 #define RCMD_SRC_HI  (*((volatile unsigned char *)RCMD_SRC_HI_ADDR))
 #define RCMD_LEN     (*((volatile unsigned char *)RCMD_LEN_ADDR))
 
-#define LAUNCH_TRIGGER  (*((volatile unsigned char *)LAUNCH_TRIGGER_ADDR))
-#define LAUNCHER_ALIVE  (*((volatile unsigned char *)LAUNCHER_ALIVE_ADDR))
-
-/* BSS section — placed at 0x3F00 by --data-loc 0x3F00.
-   main() re-syncs these from cart RAM before the poll loop,
-   so zero-initialisation by the CRT is not required. */
-static volatile unsigned char wcmd_last_seq;   /* 0x3F00 */
-static volatile unsigned char rcmd_last_seq;   /* 0x3F01 */
+/* BSS section — placed at 0x3F00 by --data-loc 0x3F00. */
 static volatile unsigned char kbd_prev0;
 static volatile unsigned char kbd_prev1;
 static volatile unsigned char kbd_prev2;
@@ -99,8 +87,7 @@ static volatile unsigned char kbd_prev5;
 static volatile unsigned char kbd_prev6;
 static volatile unsigned char kbd_prev7;
 
-/* Startup, NMI wrapper, and zx_launcher are in crt0.s */
-extern void zx_launcher(void);
+/* Startup, NMI wrapper are in crt0.s */
 
 /* ---- byte-copy helper (avoids stdlib dependency) ---- */
 static void zcopy(unsigned char *dst, const unsigned char *src, unsigned int len)
@@ -356,7 +343,8 @@ static void wcmd_poll(void)
 {
     unsigned char seq = WCMD_SEQ;
 
-    if (seq != wcmd_last_seq) {
+    /* Use mailbox DONE/SEQ only, so this is robust even if BSS isn't initialised. */
+    if (seq != WCMD_DONE) {
         unsigned int dst = (unsigned int)WCMD_DST_LO |
                            ((unsigned int)WCMD_DST_HI << 8);
         unsigned int len = (unsigned int)WCMD_LEN_LO |
@@ -370,10 +358,6 @@ static void wcmd_poll(void)
               (const unsigned char *)WCMD_DATA_ADDR, len);
 
         WCMD_DONE = seq;
-        wcmd_last_seq = seq;
-
-        /* Border = game colour from regblock[14] at 0x3F9E: "data loading" */
-        zx_border(*((volatile unsigned char *)0x3F9Eu));
     }
 }
 
@@ -382,7 +366,8 @@ static void rcmd_poll(void)
 {
     unsigned char seq = RCMD_SEQ;
 
-    if (seq != rcmd_last_seq) {
+    /* Use mailbox DONE/SEQ only, so this is robust even if BSS isn't initialised. */
+    if (seq != RCMD_DONE) {
         unsigned int src = (unsigned int)RCMD_SRC_LO |
                            ((unsigned int)RCMD_SRC_HI << 8);
         unsigned char len = RCMD_LEN;
@@ -395,7 +380,6 @@ static void rcmd_poll(void)
               (const unsigned char *)src, (unsigned int)len);
 
         RCMD_DONE = seq;
-        rcmd_last_seq = seq;
     }
 }
 
@@ -405,15 +389,6 @@ void nmi_handler_c(void)
     wcmd_poll();
     rcmd_poll();
     kbd_poll_publish();
-
-    /* Fallback launch path: if main loop is stalled/not polling, an MPU-fired
-       NMI can still consume the trigger and enter the launcher. */
-    if (LAUNCH_TRIGGER == LAUNCH_TRIGGER_GO) {
-        LAUNCHER_ALIVE = 0x5Au;
-        LAUNCH_TRIGGER = 0u;
-        ULA_PORT = GREEN;
-        zx_launcher();
-    }
 }
 
 /* ---- Main poll loop ---- */
@@ -421,47 +396,14 @@ void nmi_handler_c(void)
    Border is already CYAN (set by startup). */
 void main(void)
 {
-    unsigned char launch_seen_nonzero = 0u;
-
     zx_startup_clear();
+    zx_border(YELLOW); /* startup complete, main poll loop running */
 
-    /* Sync sequence numbers to current cart RAM state so we don't
-       re-process commands that were queued before this boot. */
-    wcmd_last_seq = WCMD_SEQ;
-    rcmd_last_seq = RCMD_SEQ;
-    kbd_prev0 = kbd_row0_read();
-    kbd_prev1 = kbd_row1_read();
-    kbd_prev2 = kbd_row2_read();
-    kbd_prev3 = kbd_row3_read();
-    kbd_prev4 = kbd_row4_read();
-    kbd_prev5 = kbd_row5_read();
-    kbd_prev6 = kbd_row6_read();
-    kbd_prev7 = kbd_row7_read();
-
+    /* _startup jumps to main (JP), it does not CALL main.
+       Returning from main would RET to garbage and crash/reset. */
     for (;;) {
-        unsigned char trig;
-
         wcmd_poll();
         rcmd_poll();
         kbd_poll_publish();
-
-        trig = LAUNCH_TRIGGER;
-        if ((trig != 0u) && (launch_seen_nonzero == 0u)) {
-            /* First non-zero trigger byte seen: mark RED once for diagnostics. */
-            ULA_PORT = RED;
-            launch_seen_nonzero = 1u;
-        }
-
-        if (trig == LAUNCH_TRIGGER_GO) {
-                /* Mark trigger consumed before entering launcher path. */
-                LAUNCHER_ALIVE = 0x5Au;
-                LAUNCH_TRIGGER = 0u;
-                /* Border: GREEN = trigger received, game launch starting. */
-                ULA_PORT = GREEN;
-                /* _zx_launcher (in crt0.s) never returns:
-               it sets border WHITE, writes alive byte, restores all Z80
-               registers from regblock at 0x3F90, then JPs to tail at 0x3FF0. */
-            zx_launcher();
-        }
     }
 }

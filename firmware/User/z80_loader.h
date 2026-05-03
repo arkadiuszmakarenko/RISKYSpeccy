@@ -14,10 +14,8 @@
 /* Print a header summary without touching ZX RAM. */
 int Z80_Info (const char *path);
 
-/* Stream a v1 .z80 snapshot to the Spectrum and resume execution via the
-   cart-RAM launcher (zxprog BSS is in cart RAM, no guard region needed).
-   Body is written by BUSREQ; registers and launcher tail are staged in
-   cart RAM at 0x3F80 / 0x3FF0 respectively. */
+/* Stream only the v1 .z80 body to ZX RAM via BUSREQ (0x4000..0xFFFF).
+   No CPU-state restore or launch/handover is performed. */
 int Z80_LoadAndRun (const char *path);
 
 #endif
