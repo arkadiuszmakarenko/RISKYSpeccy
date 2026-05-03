@@ -415,7 +415,14 @@ void ZX_BusReleaseDbg (void) {
     ZX_BusRelease();
 }
 
-/* Write one byte, read it back immediately, restore original. Returns 1 if write matched. */
+/*
+ * Timing ballast: keep this function in the image.
+ *
+ * Even though no current caller uses it, removing it has been observed to shift
+ * layout/timing enough to trigger screen corruption during load on some builds.
+ * Keep it noinline to preserve a stable code shape near cycle-sensitive bus code.
+ */
+__attribute__((noinline))
 int ZX_BusWriteReadVerify (uint16_t address, uint8_t value, uint8_t *readback_out) {
     uint8_t original = 0u;
     uint8_t verify = 0u;
@@ -502,18 +509,10 @@ void Init_Cart() {
     (void)ZX_CartRamReadBlock (ZX_KEY_SEQ_ADDR, &s_key_last_seq, 1u);
 }
 
-
-
+__attribute__((section(".text.fastirq"), aligned(64), noinline))
 void RunCartWithRAM (void) {
     struct ZXCartState *sp = state_pointer;
     uint16_t address = (uint16_t)GPIOE->INDR;
-
-    /* When ROMCS has been released the internal Spectrum ROM owns 0x0000-0x3FFF;
-       the cart must not drive the data bus. Just clear the EXTI flag and exit. */
-    if (s_rom_released) {
-        EXTI->INTFR = sp->IRQLine;
-        return;
-    }
 
      if ((GPIOB->INDR & sp->PinRD) == 0u) { // Check for RD active (active low)
         if (address < sp->RamBase) {
