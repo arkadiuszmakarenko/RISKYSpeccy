@@ -63,6 +63,19 @@ static uint8_t s_key_last_seq = 0u;
 /* Referenced by RunCartWithRAM assembly fast path. */
 static volatile uint32_t s_rom_released = 0u;
 
+/* Bus tracer. Records MREQ-low events into a ring buffer for debug sampling. */
+#define ZX_TRACE_DEPTH 512u
+typedef struct {
+    uint16_t addr;
+    uint8_t  data;
+    uint8_t  ctrl;   /* bit0=M1 bit1=RD bit2=WR (1=high) */
+} ZX_TraceEntry;
+static volatile ZX_TraceEntry s_trace[ZX_TRACE_DEPTH];
+static volatile uint16_t      s_trace_head = 0u;
+static volatile uint8_t       s_trace_full = 0u;
+
+#define ZX_PIN_M1      GPIO_Pin_9
+
 static void ZX_DataBusInput (void) {
     GPIOD->CFGLR = 0x44444444;
 }
@@ -361,6 +374,69 @@ void ZX_TriggerNMI (void) {
     GPIO_SetBits (GPIOB, ZX_PIN_INT);
 }
 
+/* Acquire bus and return number of clock toggles waited, or 0 on failure. */
+int ZX_BusAcquireDbg (uint32_t *cycles_out) {
+    uint32_t timeout = ZX_BUS_TIMEOUT;
+    uint32_t waited = 0u;
+
+    if (cycles_out != NULL) {
+        *cycles_out = 0u;
+    }
+
+    /* Same BUSREQ-first policy as ZX_BusAcquire: keep NVIC enabled until BUSACK
+       so the cart ISR can serve Z80 ROM reads during the handshake. */
+    ZX_CtrlLinesInput();
+    ZX_AddrBusInput();
+    ZX_DataBusInput();
+
+    GPIO_ResetBits (GPIOB, ZX_PIN_BUSREQ);
+
+    while (timeout-- > 0u) {
+        if ((GPIOB->INDR & ZX_PIN_BUSACK) == 0u) {
+            NVIC_DisableIRQ (EXTI15_10_IRQn);
+            EXTI->INTENR &= ~EXTI_Line10;
+            EXTI->INTFR = EXTI_Line10;
+            ZX_AddrBusOutput();
+            ZX_CtrlLinesOutput();
+            if (cycles_out != NULL) {
+                *cycles_out = waited;
+            }
+            return 1;
+        }
+        (void)ZX_WaitClockToggle (512u);
+        ++waited;
+    }
+
+    GPIO_SetBits (GPIOB, ZX_PIN_BUSREQ);
+    return 0;
+}
+
+void ZX_BusReleaseDbg (void) {
+    ZX_BusRelease();
+}
+
+/* Write one byte, read it back immediately, restore original. Returns 1 if write matched. */
+int ZX_BusWriteReadVerify (uint16_t address, uint8_t value, uint8_t *readback_out) {
+    uint8_t original = 0u;
+    uint8_t verify = 0u;
+
+    if (!ZX_BusAcquire()) {
+        return -1;
+    }
+
+    (void)ZX_BusReadCycle (address, &original);
+    (void)ZX_BusWriteCycle (address, value);
+    (void)ZX_BusReadCycle (address, &verify);
+    (void)ZX_BusWriteCycle (address, original);
+
+    ZX_BusRelease();
+
+    if (readback_out != NULL) {
+        *readback_out = verify;
+    }
+    return (verify == value) ? 1 : 0;
+}
+
 /* Cart-side control flags mailbox (0x3F00 in cart RAM, offset 0x0F00 from RamBase 0x3000).
    Set CTRL_DRAW_SUSPEND to prevent ZX main loop from calling draw_bridge_screen()
    (which does memset(0x4000,0,6144)), allowing CH32 to write/verify screen RAM. */
@@ -469,9 +545,19 @@ void RunCartWithRAM (void) {
     return;
 }
 
+
+
+
+
+
 #pragma GCC pop_options
 
-/* ===== ROMCS stubs ============================= */
+
+
+
+
+
+/* ===== ROMCS/launch compatibility stubs ============================= */
 
 #define ZX_PIN_ROMCS GPIO_Pin_3
 
@@ -517,14 +603,3 @@ void ZX_Z80Reset (void) {
          work to complete before host-side loaders start mailbox traffic. */
      Delay_Ms (1200u);
 }
-
-void ZX_RomcsRelease (void) {
-    /* Disabled by request: keep cart ROM path active. */
-    s_rom_released = 1u;
-}
-
-int ZX_RomcsIsReleased (void) {
-    return (s_rom_released != 0u) ? 1 : 0;
-}
-
-

@@ -274,22 +274,6 @@ static void ZX_CommandLs (const char *path) {
     printf("(%d entries)\r\n", count);
 }
 
-static void ZX_CommandRomcs (const char *arg) {
-    if (arg == NULL) {
-        printf("ROMCS state: %s\r\n",
-               ZX_RomcsIsReleased() ? "RELEASED (Spectrum ROM)" : "ASSERTED (cart ROM)");
-        return;
-    }
-    if (ZX_StrIeq (arg, "off") || ZX_StrIeq (arg, "release")) {
-        ZX_RomcsRelease();
-        printf("ROMCS released — internal Spectrum ROM active\r\n");
-    } else if (ZX_StrIeq (arg, "on") || ZX_StrIeq (arg, "assert")) {
-        ZX_RomcsAssert();
-        printf("ROMCS asserted — cart ROM active\r\n");
-    } else {
-        printf("Usage: romcs <on|off>\r\n");
-    }
-}
 
 static void ZX_ExecuteCommand (char *line) {
     char *cmd = strtok (line, " \t");
@@ -489,11 +473,7 @@ static void ZX_ExecuteCommand (char *line) {
         return;
     }
 
-    if (ZX_StrIeq (cmd, "romcs")) {
-        a0 = strtok (NULL, " \t");
-        ZX_CommandRomcs (a0);
-        return;
-    }
+
 
     printf("Unknown command: %s\r\n", cmd);
 }
