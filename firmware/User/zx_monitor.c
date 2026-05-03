@@ -2,6 +2,7 @@
 
 #include "debug.h"
 #include "z80_loader.h"
+#include "zx_bus.h"
 #include "zx_terminal.h"
 #include "ff.h"
 
@@ -14,6 +15,35 @@
 
 static char s_monitor_line[ZX_MONITOR_BUF_SIZE];
 static uint8_t s_monitor_len = 0u;
+static uint8_t s_autostart_done = 0u;
+static uint8_t s_autostart_pending = 0u;
+
+static void ZX_CommandZ80Select (const char *path);
+
+static void ZX_TryAutoStartZ80Select (void) {
+    const char *pending;
+    uint8_t probe = 0u;
+
+    if (s_autostart_pending == 0u) {
+        return;
+    }
+
+    if (!ZX_BusReadBlock (0x0000u, &probe, 1u)) {
+        return;
+    }
+
+    s_autostart_pending = 0u;
+    s_autostart_done = 1u;
+
+    ZX_CommandZ80Select (NULL);
+    pending = ZX_TerminalPendingZ80Selection();
+    if ((pending != NULL) && (pending[0] != '\0')) {
+        printf("z80select: loading %s\r\n", pending);
+        (void)Z80_LoadAndRun (pending);
+        ZX_TerminalClearPendingZ80Selection();
+    }
+    printf("> ");
+}
 
 static USART_TypeDef *ZX_DebugUart (void) {
 #if(DEBUG == DEBUG_UART1)
@@ -146,6 +176,8 @@ static void ZX_ExecuteCommand (char *line) {
 
 void ZX_Monitor_Init (void) {
     s_monitor_len = 0u;
+    s_autostart_done = 0u;
+    s_autostart_pending = 0u;
     memset (s_monitor_line, 0, sizeof (s_monitor_line));
 
     /* Disable stdout buffering so per-character local echo appears
@@ -160,21 +192,22 @@ void ZX_Monitor_Init (void) {
 }
 
 void ZX_Monitor_AutoStartZ80Select (void) {
-    const char *pending;
+    if (s_autostart_done != 0u) {
+        return;
+    }
+    if (s_autostart_pending != 0u) {
+        return;
+    }
+    s_autostart_pending = 1u;
 
     printf("\r\nAuto-start: z80select\r\n");
-    ZX_CommandZ80Select (NULL);
-    pending = ZX_TerminalPendingZ80Selection();
-    if ((pending != NULL) && (pending[0] != '\0')) {
-        printf("z80select: loading %s\r\n", pending);
-        (void)Z80_LoadAndRun (pending);
-        ZX_TerminalClearPendingZ80Selection();
-    }
-    printf("> ");
+    ZX_TryAutoStartZ80Select();
 }
 
 void ZX_Monitor_Poll (void) {
     char ch;
+
+    ZX_TryAutoStartZ80Select();
 
     while (ZX_UartTryReadChar (&ch)) {
         if ((ch == '\r') || (ch == '\n')) {

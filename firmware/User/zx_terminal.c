@@ -218,6 +218,21 @@ static int ZX_BusWriteDiff (uint16_t base_addr,
     return 1;
 }
 
+static int ZX_WaitNmiMailboxReady (uint32_t timeout_ms) {
+    uint8_t probe;
+    uint32_t waited = 0u;
+
+    while (waited < timeout_ms) {
+        if (ZX_BusReadBlock (0x0000u, &probe, 1u)) {
+            return 1;
+        }
+        Delay_Ms (20u);
+        waited += 20u;
+    }
+
+    return 0;
+}
+
 static int ZX_TermFlushBuffers (void) {
     if (!s_prev_valid) {
         if (!ZX_BusWriteChunked (ZX_SCREEN_PIXELS_ADDR,
@@ -851,8 +866,14 @@ void ZX_TerminalCommandZ80Select (const char *path) {
     uint8_t selected = 0u;
     char full_path[128];
     int draw_suspended = 0;
+    uint8_t render_attempt;
 
     s_z80select_pending[0] = '\0';
+
+    if (!ZX_WaitNmiMailboxReady (3000u)) {
+        printf("ERR: z80select mailbox not ready\r\n");
+        goto done;
+    }
 
     ZX_CartDrawSuspend();
     Delay_Ms (50u);
@@ -863,9 +884,14 @@ void ZX_TerminalCommandZ80Select (const char *path) {
     }
     if (!ZX_BrowserRender (path, selected)) {
         /* Startup can race zxprog mailbox readiness right after reset.
-           Retry once before giving up. */
-        Delay_Ms (80u);
-        if (!ZX_BrowserRender (path, selected)) {
+           Keep retrying briefly before giving up. */
+        for (render_attempt = 0u; render_attempt < 20u; ++render_attempt) {
+            Delay_Ms (80u);
+            if (ZX_BrowserRender (path, selected)) {
+                break;
+            }
+        }
+        if (render_attempt == 20u) {
             printf("ERR: z80select draw failed\r\n");
             goto done;
         }
