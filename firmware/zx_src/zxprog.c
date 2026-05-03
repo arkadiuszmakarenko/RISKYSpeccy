@@ -13,8 +13,7 @@
  *
  * Border colour sequence (visible on the Spectrum display):
  *   YELLOW (6)  startup complete, main poll loop running
- *   <game> (*)  first WCMD received — game data loading, border from regblock[14]
- *   GREEN  (4)  trigger 0x55 detected — game launch starting
+ *   rotating(*) each WCMD chunk copied, border cycles to show loading activity
  *   WHITE  (7)  launcher entered, alive byte written
  *   <snap> (*)  snapshot's own border colour restored from regblock
  *
@@ -25,6 +24,7 @@
  *   0x3028..0x3029  KEY_SEQ / KEY_CODE (ZX->MPU key events)
  *   0x3F00..0x3F01  BSS (wcmd_last_seq, rcmd_last_seq) — placed by linker
  *   0x3F10          LAUNCH_TRIGGER  (CH32 writes 0x55)
+ *   0x3F11          LOADER_FLAGS    (bit0 enables loading border animation)
  *   0x3F20..0x3F24  RCMD meta
  *   0x3F40..0x3F7F  RCMD buffer (64 bytes)
  *   0x3F90..0x3FA9  REGBLOCK (26 bytes, written by CH32)
@@ -76,6 +76,10 @@
 #define RCMD_SRC_LO  (*((volatile unsigned char *)RCMD_SRC_LO_ADDR))
 #define RCMD_SRC_HI  (*((volatile unsigned char *)RCMD_SRC_HI_ADDR))
 #define RCMD_LEN     (*((volatile unsigned char *)RCMD_LEN_ADDR))
+
+#define LOADER_FLAGS_ADDR   0x3F11u
+#define LOADER_FLAGS        (*((volatile unsigned char *)LOADER_FLAGS_ADDR))
+#define LOADER_FLAG_BORDER_ANIM 0x01u
 
 /* BSS section — placed at 0x3F00 by --data-loc 0x3F00. */
 static volatile unsigned char kbd_prev0;
@@ -341,6 +345,10 @@ static void zx_startup_clear(void)
 /* ---- WCMD poll ---- */
 static void wcmd_poll(void)
 {
+    static unsigned char load_border_phase = 0u;
+    static const unsigned char load_border_cycle[6] = {
+        BLUE, CYAN, RED, MAGENTA, YELLOW, GREEN
+    };
     unsigned char seq = WCMD_SEQ;
 
     /* Use mailbox DONE/SEQ only, so this is robust even if BSS isn't initialised. */
@@ -356,6 +364,13 @@ static void wcmd_poll(void)
 
         zcopy((unsigned char *)dst,
               (const unsigned char *)WCMD_DATA_ADDR, len);
+
+          /* Visual loading indicator is enabled only for snapshot body load.
+              Other WCMD traffic (menu/UI updates) keeps border stable. */
+          if ((LOADER_FLAGS & LOADER_FLAG_BORDER_ANIM) != 0u) {
+                zx_border(load_border_cycle[load_border_phase]);
+                load_border_phase = (unsigned char)((load_border_phase + 1u) % 6u);
+          }
 
         WCMD_DONE = seq;
     }

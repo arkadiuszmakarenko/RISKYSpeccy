@@ -669,7 +669,7 @@ static int ZX_BrowserRender (const char *path, uint8_t selected) {
     ZX_TermModelWriteAt (0u, 0u, "Z80 FILE SELECTOR", normal_attr);
     ZX_TermModelWriteAt (1u, 0u, ((path != NULL) && (path[0] != '\0')) ? path : "/", normal_attr);
     ZX_TermModelWriteAt (2u, 0u, "Q/A MOVE  O/P PAGE", normal_attr);
-    ZX_TermModelWriteAt (3u, 0u, "ENTER RUN  SPACE EXIT", normal_attr);
+    ZX_TermModelWriteAt (3u, 0u, "ENTER RUN", normal_attr);
 
     if (s_browser_count == 0u) {
         ZX_TermModelWriteAt (6u, 0u, "NO Z80 FILES FOUND", normal_attr);
@@ -901,7 +901,7 @@ void ZX_TerminalCommandZ80Select (const char *path) {
         goto done;
     }
 
-    printf("z80select: Q/A move, O/P page, ENTER run, SPACE exit\r\n");
+    printf("z80select: Q/A move, O/P page, ENTER run\r\n");
 
     for (;;) {
         uint8_t key = 0u;
@@ -959,10 +959,6 @@ void ZX_TerminalCommandZ80Select (const char *path) {
                 goto done;
             }
             continue;
-        }
-        if (key == ' ') {
-            printf("z80select: cancelled\r\n");
-            goto done;
         }
         if (key == '\n') {
             ZX_BrowserBuildPath (full_path, sizeof (full_path), path, s_browser_files[selected]);

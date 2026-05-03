@@ -8,6 +8,7 @@ Symbol Table
     .__.CPU.                                                    =  000000 L
     .__.H$L.                                                    =  000000 L
     _ULA_PORT                                                   =  0000FE 
+    __moduint                                                      ****** GX
   0 _kbd_decode_press                                              0000B1 R
   0 _kbd_poll_publish                                              0003EC R
   1 _kbd_prev0                                                     000000 R
@@ -27,10 +28,12 @@ Symbol Table
   0 _kbd_row5_read                                                 000086 R
   0 _kbd_row6_read                                                 00008D R
   0 _kbd_row7_read                                                 000094 R
-  0 _main                                                          0005A0 GR
-  0 _nmi_handler_c                                                 000597 GR
-  0 _rcmd_poll                                                     000561 R
+  0 _main                                                          0005DB GR
+  0 _nmi_handler_c                                                 0005D2 GR
+  0 _rcmd_poll                                                     00059C R
   0 _wcmd_poll                                                     000516 R
+  0 _wcmd_poll_load_border_cycle_65536_48                          000596 R
+  1 _wcmd_poll_load_border_phase_65536_48                          000008 R
   0 _zcopy                                                         000000 R
   0 _zfill                                                         000040 R
     _zx_launcher                                                   ****** GX
@@ -42,12 +45,12 @@ Hexadecimal [24-Bits]
 
 Area Table
 
-   0 _CODE                                      size    5BC   flags    0
-   1 _DATA                                      size      8   flags    0
+   0 _CODE                                      size    5F7   flags    0
+   1 _DATA                                      size      9   flags    0
    2 _INITIALIZED                               size      0   flags    0
    3 _DABS                                      size      0   flags    8
    4 _HOME                                      size      0   flags    0
-   5 _GSINIT                                    size      0   flags    0
+   5 _GSINIT                                    size      8   flags    0
    6 _GSFINAL                                   size      0   flags    0
    7 _INITIALIZER                               size      0   flags    0
    8 _CABS                                      size      0   flags    8

@@ -15,6 +15,9 @@
 #define Z80L_BODY_BASE         0x4000u
 #define Z80L_BODY_LEN          49152u
 
+#define Z80L_LOADER_FLAGS_ADDR      0x3F11u
+#define Z80L_LOADER_FLAG_BORDER_ANIM 0x01u
+
 
 /* Header bytes used by the .z80 v1 spec (offsets from start of file). */
 typedef struct {
@@ -231,6 +234,8 @@ int Z80_LoadAndRun (const char *path) {
     Z80Header h;
     Z80Reader rd;
     ZX_Z80State state;
+    uint8_t loader_flags;
+    uint8_t loader_flags_clear = 0u;
     int rc;
 
     rc = z80_open_and_parse (path, &fp, &h);
@@ -239,6 +244,14 @@ int Z80_LoadAndRun (const char *path) {
     printf ("z80: copying body (%s) to RAM via NMI mailbox\r\n",
             h.compressed ? "compressed" : "raw");
 
+    /* Enable ZX-side loading border animation only for snapshot body transfer. */
+    loader_flags = Z80L_LOADER_FLAG_BORDER_ANIM;
+    if (!ZX_CartRamWriteBlock (Z80L_LOADER_FLAGS_ADDR, &loader_flags, 1u)) {
+        printf ("z80: failed to set loader flags\r\n");
+        f_close (&fp);
+        return Z80L_ERR_LOAD;
+    }
+
     /* Stream 49152-byte body via NMI mailbox to 0x4000..0xFFFF.
        zxprog BSS is in cart RAM (0x3000..0x3FFF), never clobbered. */
     z80_reader_init (&rd, &fp);
@@ -246,10 +259,12 @@ int Z80_LoadAndRun (const char *path) {
     if (!z80_stream_body (&rd, &out, h.compressed)) {
         printf ("z80: body stream failed (%lu bytes)\r\n",
                 (unsigned long)out.total);
+        (void)ZX_CartRamWriteBlock (Z80L_LOADER_FLAGS_ADDR, &loader_flags_clear, 1u);
         f_close (&fp);
         return Z80L_ERR_LOAD;
     }
     f_close (&fp);
+    (void)ZX_CartRamWriteBlock (Z80L_LOADER_FLAGS_ADDR, &loader_flags_clear, 1u);
     printf ("z80: body streamed (%lu bytes)\r\n", (unsigned long)out.total);
 
     /* Build CPU state from the snapshot header. */
