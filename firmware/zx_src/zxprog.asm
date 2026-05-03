@@ -10,6 +10,7 @@
 ;--------------------------------------------------------
 	.globl _main
 	.globl _nmi_handler_c
+	.globl _zx_launcher
 ;--------------------------------------------------------
 ; special function registers
 ;--------------------------------------------------------
@@ -1154,37 +1155,43 @@ _rcmd_poll:
 	ld	(hl), c
 ;zxprog.c:384: }
 	ret
-;zxprog.c:387: void nmi_handler_c(void)
+;zxprog.c:398: void nmi_handler_c(void)
 ;	---------------------------------
 ; Function nmi_handler_c
 ; ---------------------------------
 _nmi_handler_c::
-;zxprog.c:389: wcmd_poll();
+;zxprog.c:400: wcmd_poll();
 	call	_wcmd_poll
-;zxprog.c:390: rcmd_poll();
+;zxprog.c:401: rcmd_poll();
 	call	_rcmd_poll
-;zxprog.c:391: kbd_poll_publish();
-;zxprog.c:392: }
+;zxprog.c:402: kbd_poll_publish();
+;zxprog.c:403: }
 	jp	_kbd_poll_publish
-;zxprog.c:397: void main(void)
+;zxprog.c:408: void main(void)
 ;	---------------------------------
 ; Function main
 ; ---------------------------------
 _main::
-;zxprog.c:399: zx_startup_clear();
+;zxprog.c:410: zx_startup_clear();
 	call	_zx_startup_clear
-;zxprog.c:400: zx_border(YELLOW); /* startup complete, main poll loop running */
+;zxprog.c:411: zx_border(YELLOW); /* startup complete, main poll loop running */
 	ld	a, #0x06
 	out	(_ULA_PORT), a
-00102$:
-;zxprog.c:405: wcmd_poll();
+00104$:
+;zxprog.c:416: wcmd_poll();
 	call	_wcmd_poll
-;zxprog.c:406: rcmd_poll();
+;zxprog.c:417: rcmd_poll();
 	call	_rcmd_poll
-;zxprog.c:407: kbd_poll_publish();
+;zxprog.c:418: kbd_poll_publish();
 	call	_kbd_poll_publish
-;zxprog.c:409: }
-	jr	00102$
+;zxprog.c:422: if (LAUNCH_TRIGGER == 0x55u) {
+	ld	a, (#0x3f10)
+	sub	a, #0x55
+	jr	NZ, 00104$
+;zxprog.c:423: zx_launcher();
+	call	_zx_launcher
+;zxprog.c:426: }
+	jr	00104$
 	.area _CODE
 	.area _INITIALIZER
 	.area _CABS (ABS)

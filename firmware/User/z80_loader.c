@@ -230,12 +230,13 @@ int Z80_LoadAndRun (const char *path) {
     static Z80OutState out;
     Z80Header h;
     Z80Reader rd;
+    ZX_Z80State state;
     int rc;
 
     rc = z80_open_and_parse (path, &fp, &h);
     if (rc != Z80L_OK) { return rc; }
 
-        printf ("z80: copying body (%s) to RAM via NMI mailbox\r\n",
+    printf ("z80: copying body (%s) to RAM via NMI mailbox\r\n",
             h.compressed ? "compressed" : "raw");
 
     /* Stream 49152-byte body via NMI mailbox to 0x4000..0xFFFF.
@@ -249,8 +250,28 @@ int Z80_LoadAndRun (const char *path) {
         return Z80L_ERR_LOAD;
     }
     f_close (&fp);
-    printf ("z80: body streamed (%lu bytes via NMI mailbox)\r\n",
-            (unsigned long)out.total);
-    printf ("z80: RAM body copy complete; launch/state-restore disabled.\r\n");
+    printf ("z80: body streamed (%lu bytes)\r\n", (unsigned long)out.total);
+
+    /* Build CPU state from the snapshot header. */
+    state.a      = h.a;       state.f      = h.f;
+    state.a_alt  = h.a_alt;   state.f_alt  = h.f_alt;
+    state.bc     = h.bc;      state.de     = h.de;      state.hl     = h.hl;
+    state.bc_alt = h.bc_alt;  state.de_alt = h.de_alt;  state.hl_alt = h.hl_alt;
+    state.ix     = h.ix;      state.iy     = h.iy;
+    state.sp     = h.sp;      state.pc     = h.pc;
+    state.i      = h.i;       state.r      = h.r;
+    state.iff1   = h.iff1;
+    state.im     = h.im;
+    state.border = h.border;
+
+    printf ("z80: launching PC=%04X SP=%04X IM=%u IFF1=%u\r\n",
+            (unsigned)state.pc, (unsigned)state.sp,
+            (unsigned)state.im, (unsigned)state.iff1);
+
+    if (!ZX_LaunchZ80 (&state)) {
+        printf ("z80: launch failed\r\n");
+        return Z80L_ERR_LAUNCH;
+    }
+
     return Z80L_OK;
 }

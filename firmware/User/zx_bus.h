@@ -19,25 +19,44 @@ int ZX_KeyPoll (uint8_t *keycode_out);
 void ZX_CartDrawSuspend (void);
 void ZX_CartDrawResume (void);
 
-/* ROMCS release path is disabled; assert/reset keep cart ROM path active. */
+/* Full Z80 CPU state used to restore a .z80 v1 snapshot. */
+typedef struct {
+    uint8_t  a,  f;
+    uint8_t  a_alt, f_alt;
+    uint16_t bc,     de,     hl;
+    uint16_t bc_alt, de_alt, hl_alt;
+    uint16_t ix, iy;
+    uint16_t sp, pc;
+    uint8_t  i, r;
+    uint8_t  iff1;
+    uint8_t  im;      /* interrupt mode: 0, 1, or 2 */
+    uint8_t  border;
+} ZX_Z80State;
+
+/* Release ROMCS to input-floating (tristate) and disable the cart ISR.
+   Call only in an emergency / abort path; normal launch uses the automatic
+   ISR handover armed by ZX_LaunchZ80. */
 void ZX_RomcsRelease (void);
 void ZX_RomcsAssert  (void);
 void ZX_Z80Reset     (void);  /* pulse /RESET LOW then wait 1200ms for zxprog init */
 
-
-/* Launch/snapshot APIs are disabled and currently return 0. */
-int  ZX_LaunchZ80 (uint16_t start_addr);
-int  ZX_SnapshotEnter  (uint16_t tramp_addr, uint16_t alive_addr,
-                        uint8_t alive_value, uint32_t timeout_ms);
-int  ZX_SnapshotCommit (uint16_t handover_addr, uint16_t go_addr,
-                        uint8_t go_value, uint32_t wait_ms);
-int  ZX_SnapshotCommitDual (uint16_t handover_addr_a,
-                            uint16_t handover_addr_b,
-                            uint16_t go_addr,
-                            uint8_t go_value,
-                            uint32_t wait_ms);
-
-/* Returns 0xFFFF when launch/handover is disabled. */
-uint16_t ZX_SnapshotHandoverFiredAddr (void);
+/* Restore the full Z80 CPU state from a snapshot and launch the game.
+ *
+ * Sequence:
+ *   1. Writes regblock (26 bytes) to cart RAM at 0x3F90 for _zx_launcher.
+ *   2. Writes launcher tail (6 bytes) to cart RAM at 0x3FF0:
+ *      [ED, IM_byte, EI/NOP, C3, pc_lo, pc_hi].
+ *   3. Arms ROMCS handover: after the cart ISR serves address 0x3FF5
+ *      (the JP pc_hi byte — the last byte before the Z80 jumps to game space),
+ *      ROMCS is switched to input-floating (tristate) and the cart ISR is
+ *      disabled, handing control cleanly to the ZX Spectrum hardware.
+ *   4. Writes LAUNCH_TRIGGER = 0x55 to 0x3F10; zxprog detects this and calls
+ *      _zx_launcher, which restores all registers and jumps to the game.
+ *   5. Polls LAUNCHER_ALIVE (0x3FAA) until 0xAA appears (launcher fired) or
+ *      timeout.
+ *
+ * Returns 1 on success, 0 on error or timeout.
+ */
+int ZX_LaunchZ80 (const ZX_Z80State *state);
 
 #endif

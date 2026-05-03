@@ -33,6 +33,7 @@ Symbol Table
   0 _wcmd_poll                                                     000516 R
   0 _zcopy                                                         000000 R
   0 _zfill                                                         000040 R
+    _zx_launcher                                                   ****** GX
   0 _zx_startup_clear                                              0004FC R
 
 
@@ -41,7 +42,7 @@ Hexadecimal [24-Bits]
 
 Area Table
 
-   0 _CODE                                      size    5B2   flags    0
+   0 _CODE                                      size    5BC   flags    0
    1 _DATA                                      size      8   flags    0
    2 _INITIALIZED                               size      0   flags    0
    3 _DABS                                      size      0   flags    8

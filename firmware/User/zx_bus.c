@@ -74,6 +74,12 @@ struct ZXCartState {
     uint16_t PinWR;
     uint16_t PinMREQ;
     uint32_t IRQLine;
+    /* When handover_addr != 0xFFFF, the cart ISR will tristate ROMCS and
+       disable itself immediately after serving a read from this address.
+       Set to 0x3FF5 (JP pc_hi of the launcher tail) before triggering
+       _zx_launcher so the handover fires exactly when the Z80 jumps from
+       cart space into game space. */
+    volatile uint16_t handover_addr;
     volatile uint8_t ram[0x1000];
 };
 
@@ -350,6 +356,7 @@ void Init_Cart() {
     state_pointer->PinWR = GPIO_Pin_4;
     state_pointer->PinMREQ = GPIO_Pin_10;
     state_pointer->IRQLine = EXTI_Line10;
+    state_pointer->handover_addr = 0xFFFFu;
 
     gpio.GPIO_Pin = ZX_PIN_BUSACK | ZX_PIN_CK_INV;
     gpio.GPIO_Mode = GPIO_Mode_IN_FLOATING;
@@ -395,6 +402,19 @@ void RunCartWithRAM (void) {
             GPIOD->OUTDR = (GPIOD->OUTDR & ~sp->DataMask) | sp->ram[address - sp->RamBase];
             while ((GPIOB->INDR & sp->PinRD) == 0u) { }
             GPIOD->CFGLR = sp->BusOff;
+            /* Handover: after serving the last launcher-tail byte (0x3FF5 =
+               JP pc_hi), tristate ROMCS and disable the cart ISR so the Z80
+               executes the game unimpeded.  The ZX ULA then takes over ROM
+               selection for 0x0000-0x3FFF; RAM at 0x4000+ is unaffected. */
+            if (address == sp->handover_addr) {
+                sp->handover_addr = 0xFFFFu;
+                /* ROMCS (PB3) → input-floating: bits [15:12] of CFGLR.
+                   CNF=01 (floating input), MODE=00.  One write; no RMW hazard
+                   since the Z80 RD has already been released above. */
+                GPIOB->CFGLR = (GPIOB->CFGLR & ~(0xFu << 12)) | (0x4u << 12);
+                EXTI->INTENR &= ~sp->IRQLine;
+                NVIC_DisableIRQ (EXTI15_10_IRQn);
+            }
         }
     } else {
         while (((GPIOB->INDR & sp->PinMREQ) == 0u) && ((GPIOB->INDR & sp->PinWR) != 0u)) { }
@@ -426,9 +446,29 @@ void RunCartWithRAM (void) {
 
 
 
-/* ===== ROMCS/launch compatibility stubs ============================= */
+/* ===== ROMCS release and snapshot launch ========================== */
 
 #define ZX_PIN_ROMCS GPIO_Pin_3
+
+/* Snapshot mailbox addresses in cart RAM (base 0x3000) */
+#define ZX_LAUNCH_TRIGGER_ADDR  0x3F10u   /* CH32 writes 0x55 to fire launcher  */
+#define ZX_REGBLOCK_ADDR        0x3F90u   /* 26-byte register block for launcher */
+#define ZX_LAUNCHER_ALIVE_ADDR  0x3FAAu   /* launcher writes 0xAA when running  */
+#define ZX_LAUNCHER_TAIL_ADDR   0x3FF0u   /* 6-byte IM/EI/JP tail               */
+#define ZX_LAUNCHER_HANDOVER    0x3FF5u   /* last byte of tail: JP pc_hi        */
+#define ZX_LAUNCH_TIMEOUT_MS    3000u
+
+void ZX_RomcsRelease (void) {
+    /* Emergency / abort tristate: switch ROMCS to input-floating and stop
+       the cart ISR.  Normal launch uses the automatic handover in the ISR. */
+    if (state_pointer != NULL) {
+        state_pointer->handover_addr = 0xFFFFu;
+    }
+    NVIC_DisableIRQ (EXTI15_10_IRQn);
+    EXTI->INTENR &= ~EXTI_Line10;
+    /* ROMCS (PB3) → input-floating */
+    GPIOB->CFGLR = (GPIOB->CFGLR & ~(0xFu << 12)) | (0x4u << 12);
+}
 
 void ZX_RomcsAssert (void) {
     /* Keep cart ROM selected and cart ISR active. */
@@ -471,4 +511,100 @@ void ZX_Z80Reset (void) {
      /* zxprog now clears 48K RAM at startup; allow enough time for that
          work to complete before host-side loaders start mailbox traffic. */
      Delay_Ms (1200u);
+}
+
+int ZX_LaunchZ80 (const ZX_Z80State *state) {
+    uint8_t rb[26];  /* regblock — consumed via POP series in _zx_launcher   */
+    uint8_t tail[6]; /* launcher tail: IM, EI/NOP, JP user_pc                */
+    uint8_t trigger = 0x55u;
+    uint8_t alive_clear = 0x00u;
+    uint8_t r_comp;
+    uint32_t waited;
+
+    if ((state == NULL) || (state_pointer == NULL)) {
+        return 0;
+    }
+
+    /* R compensation: _zx_launcher runs exactly 12 M1 cycles from LD R,A to
+       the user_pc M1 fetch (see crt0.s comment).  Each M1 increments the low
+       7 bits of R; bit 7 is not auto-incremented so we preserve it. */
+    r_comp = (uint8_t)(((state->r & 0x7Fu) - 12u) & 0x7Fu) | (state->r & 0x80u);
+
+    /* Regblock layout: 13 two-byte POP slots loaded by _zx_launcher.
+       Each POP reads lo byte from lower address, hi byte from higher address
+       (Z80 little-endian stack convention).
+
+       Offset  Bytes     Consumed by
+       0x00    C'  B'    POP BC  then EXX  → BC'
+       0x02    E'  D'    POP DE  then EXX  → DE'
+       0x04    L'  H'    POP HL  then EXX  → HL'
+       0x06    F'  A'    POP AF  then EX AF,AF' → AF'
+       0x08    IXl IXh   POP IX
+       0x0A    IYl IYh   POP IY
+       0x0C    xx  I     POP AF  → A=I, LD I,A
+       0x0E    bdr R     POP BC  → C=border, B=R_comp; OUT(0xFE),C; LD R,B
+       0x10    C   B     POP BC  → main BC
+       0x12    E   D     POP DE  → main DE
+       0x14    L   H     POP HL  → main HL
+       0x16    F   A     POP AF  → main AF
+       0x18    SPl SPh   LD SP,(0x3FA8)  → user SP  */
+    rb[0]  = (uint8_t)(state->bc_alt & 0xFFu);  rb[1]  = (uint8_t)(state->bc_alt >> 8);
+    rb[2]  = (uint8_t)(state->de_alt & 0xFFu);  rb[3]  = (uint8_t)(state->de_alt >> 8);
+    rb[4]  = (uint8_t)(state->hl_alt & 0xFFu);  rb[5]  = (uint8_t)(state->hl_alt >> 8);
+    rb[6]  = state->f_alt;                       rb[7]  = state->a_alt;
+    rb[8]  = (uint8_t)(state->ix & 0xFFu);       rb[9]  = (uint8_t)(state->ix >> 8);
+    rb[10] = (uint8_t)(state->iy & 0xFFu);       rb[11] = (uint8_t)(state->iy >> 8);
+    rb[12] = 0x00u;                              rb[13] = state->i;
+    rb[14] = state->border;                      rb[15] = r_comp;
+    rb[16] = (uint8_t)(state->bc & 0xFFu);       rb[17] = (uint8_t)(state->bc >> 8);
+    rb[18] = (uint8_t)(state->de & 0xFFu);       rb[19] = (uint8_t)(state->de >> 8);
+    rb[20] = (uint8_t)(state->hl & 0xFFu);       rb[21] = (uint8_t)(state->hl >> 8);
+    rb[22] = state->f;                           rb[23] = state->a;
+    rb[24] = (uint8_t)(state->sp & 0xFFu);       rb[25] = (uint8_t)(state->sp >> 8);
+
+    /* Launcher tail at 0x3FF0: IM instruction, EI or NOP, JP user_pc. */
+    tail[0] = 0xEDu;
+    tail[1] = (state->im == 0u) ? 0x46u : (state->im == 1u) ? 0x56u : 0x5Eu;
+    tail[2] = (state->iff1 != 0u) ? 0xFBu : 0x00u;  /* EI or NOP */
+    tail[3] = 0xC3u;                                  /* JP        */
+    tail[4] = (uint8_t)(state->pc & 0xFFu);           /* pc_lo     */
+    tail[5] = (uint8_t)(state->pc >> 8);              /* pc_hi     */
+
+    if (!ZX_CartRamWriteBlock (ZX_REGBLOCK_ADDR, rb, (uint16_t)sizeof(rb))) {
+        printf ("z80: regblock write failed\r\n");
+        return 0;
+    }
+    if (!ZX_CartRamWriteBlock (ZX_LAUNCHER_TAIL_ADDR, tail, (uint16_t)sizeof(tail))) {
+        printf ("z80: launcher tail write failed\r\n");
+        return 0;
+    }
+
+    /* Arm the ROMCS handover: ISR tristates ROMCS after serving 0x3FF5. */
+    NVIC_DisableIRQ (EXTI15_10_IRQn);
+    state_pointer->handover_addr = (uint16_t)ZX_LAUNCHER_HANDOVER;
+    NVIC_EnableIRQ (EXTI15_10_IRQn);
+
+    /* Clear LAUNCHER_ALIVE so we can detect when the launcher fires. */
+    if (!ZX_CartRamWriteBlock (ZX_LAUNCHER_ALIVE_ADDR, &alive_clear, 1u)) {
+        return 0;
+    }
+
+    /* Trigger: zxprog polls 0x3F10 and calls _zx_launcher when it sees 0x55.
+       Written directly to cart RAM — no NMI triggered, no race with mailbox. */
+    if (!ZX_CartRamWriteBlock (ZX_LAUNCH_TRIGGER_ADDR, &trigger, 1u)) {
+        return 0;
+    }
+
+    /* Wait for LAUNCHER_ALIVE = 0xAA (written by _zx_launcher in crt0.s). */
+    waited = 0u;
+    while (state_pointer->ram[ZX_LAUNCHER_ALIVE_ADDR - 0x3000u] != 0xAAu) {
+        Delay_Ms (1u);
+        if (++waited >= ZX_LAUNCH_TIMEOUT_MS) {
+            printf ("z80: launcher timeout — alive byte never set\r\n");
+            return 0;
+        }
+    }
+
+    printf ("z80: launched (alive in %lu ms)\r\n", (unsigned long)waited);
+    return 1;
 }

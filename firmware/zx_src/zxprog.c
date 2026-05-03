@@ -383,6 +383,17 @@ static void rcmd_poll(void)
     }
 }
 
+/* LAUNCH_TRIGGER mailbox: CH32 writes 0x55 when game RAM is loaded and all
+   registers have been written to REGBLOCK (0x3F90) + LAUNCHER_TAIL (0x3FF0).
+   The main poll loop detects this and calls _zx_launcher (defined in crt0.s)
+   which restores the full Z80 CPU state and jumps to the game.  Never returns. */
+#define LAUNCH_TRIGGER_ADDR  0x3F10u
+#define LAUNCH_TRIGGER       (*((volatile unsigned char *)LAUNCH_TRIGGER_ADDR))
+
+/* Forward declaration: implemented as _zx_launcher in crt0.s.
+   SDCC C name 'zx_launcher' maps to assembler symbol '_zx_launcher'. */
+extern void zx_launcher(void);
+
 /* ---- NMI C handler: called from _nmi_wrapper in crt0.s ---- */
 void nmi_handler_c(void)
 {
@@ -405,5 +416,11 @@ void main(void)
         wcmd_poll();
         rcmd_poll();
         kbd_poll_publish();
+        /* Launch trigger: CH32 writes 0x55 after loading snapshot RAM and
+           regblock.  _zx_launcher restores all registers and jumps to the
+           game PC; it never returns. */
+        if (LAUNCH_TRIGGER == 0x55u) {
+            zx_launcher();
+        }
     }
 }
