@@ -1203,8 +1203,8 @@ _nmi_handler_c::
 _main::
 ;zxprog.c:425: zx_startup_clear();
 	call	_zx_startup_clear
-;zxprog.c:426: zx_border(YELLOW); /* startup complete, main poll loop running */
-	ld	a, #0x06
+;zxprog.c:426: zx_border(GREEN); /* startup complete, main poll loop running */
+	ld	a, #0x04
 	out	(_ULA_PORT), a
 00104$:
 ;zxprog.c:431: wcmd_poll();

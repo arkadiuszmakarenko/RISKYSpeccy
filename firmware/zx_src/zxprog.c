@@ -423,7 +423,7 @@ void nmi_handler_c(void)
 void main(void)
 {
     zx_startup_clear();
-    zx_border(YELLOW); /* startup complete, main poll loop running */
+    zx_border(GREEN); /* startup complete, main poll loop running */
 
     /* _startup jumps to main (JP), it does not CALL main.
        Returning from main would RET to garbage and crash/reset. */

@@ -28,8 +28,11 @@
 #define ZX_SCREEN_WRITE_CHUNK 64u
 
 #define ZX_BROWSER_MAX_FILES    64u
-#define ZX_BROWSER_NAME_MAX     48u
+#define ZX_BROWSER_NAME_MAX     160u
+#define ZX_BROWSER_PATH_MAX     196u
 #define ZX_BROWSER_PAGE_ROWS    18u
+#define ZX_BROWSER_SCAN_RETRIES 8u
+#define ZX_BROWSER_RENDER_RETRIES 20u
 
 static uint8_t s_gfx_pixels[ZX_SCREEN_PIXELS_LEN];
 static uint8_t s_gfx_attrs[ZX_SCREEN_ATTRS_LEN];
@@ -51,9 +54,10 @@ static uint8_t s_term_csi_param[4];
 static uint8_t s_term_csi_count = 0u;
 static uint8_t s_term_csi_building = 0u;
 static uint8_t s_term_csi_value = 0u;
+static uint8_t s_selector_font_mode = 0u;
 static char s_browser_files[ZX_BROWSER_MAX_FILES][ZX_BROWSER_NAME_MAX];
 static uint8_t s_browser_count = 0u;
-static char s_z80select_pending[128];
+static char s_z80select_pending[ZX_BROWSER_PATH_MAX];
 
 static const uint8_t s_font4x7_chars[] =
     " 0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ-.:/_";
@@ -131,6 +135,7 @@ static uint16_t ZX_PixelAddr (uint8_t y, uint8_t x_byte) {
 
 static uint8_t ZX_Expand4To8 (uint8_t bits4) {
     uint8_t out = 0u;
+
     if ((bits4 & 0x8u) != 0u) { out |= 0xC0u; }
     if ((bits4 & 0x4u) != 0u) { out |= 0x30u; }
     if ((bits4 & 0x2u) != 0u) { out |= 0x0Cu; }
@@ -149,6 +154,11 @@ static void ZX_TermRenderCellToBuffers (uint8_t col, uint8_t row) {
 
     for (r = 0u; r < 8u; ++r) {
         uint8_t pix = (r < 7u) ? ZX_Expand4To8 (ZX_Font4x7Row (ch, r)) : 0u;
+        if (s_selector_font_mode != 0u) {
+            /* Keep selector text bold but add a 1-pixel gutter between
+               adjacent cells so letters do not visually merge. */
+            pix &= 0xFEu;
+        }
         uint16_t addr = (uint16_t)(ZX_PixelAddr ((uint8_t)(row * 8u + r), col) - ZX_SCREEN_PIXELS_ADDR);
         s_gfx_pixels[addr] = pix;
     }
@@ -606,55 +616,85 @@ static int ZX_BrowserLoadFiles (const char *path) {
     FILINFO fno;
     FRESULT fr;
     const char *target = ((path != NULL) && (path[0] != '\0')) ? path : "/";
+    uint8_t attempt;
 
-    s_browser_count = 0u;
-    fr = f_opendir (&dir, target);
-    if (fr != FR_OK) {
-        printf("z80select: cannot open '%s' (fr=%d)\r\n", target, (int)fr);
-        return 0;
-    }
-
-    while (1) {
-        fr = f_readdir (&dir, &fno);
+    for (attempt = 0u; attempt < ZX_BROWSER_SCAN_RETRIES; ++attempt) {
+        s_browser_count = 0u;
+        fr = f_opendir (&dir, target);
         if (fr != FR_OK) {
-            printf("z80select: readdir failed (fr=%d)\r\n", (int)fr);
-            f_closedir (&dir);
-            return 0;
-        }
-        if (fno.fname[0] == '\0') {
-            break;
-        }
-        if ((fno.fattrib & AM_DIR) != 0u) {
+            Delay_Ms (80u);
             continue;
         }
-        if (!ZX_HasZ80Extension ((const char *)fno.fname)) {
-            continue;
+
+        while (1) {
+            fr = f_readdir (&dir, &fno);
+            if (fr != FR_OK) {
+                break;
+            }
+            if (fno.fname[0] == '\0') {
+                break;
+            }
+            if ((fno.fattrib & AM_DIR) != 0u) {
+                continue;
+            }
+            if (!ZX_HasZ80Extension ((const char *)fno.fname)) {
+                continue;
+            }
+            if (s_browser_count >= ZX_BROWSER_MAX_FILES) {
+                break;
+            }
+            strncpy (s_browser_files[s_browser_count],
+                     (const char *)fno.fname,
+                     (size_t)(ZX_BROWSER_NAME_MAX - 1u));
+            s_browser_files[s_browser_count][ZX_BROWSER_NAME_MAX - 1u] = '\0';
+            ++s_browser_count;
         }
-        if (s_browser_count >= ZX_BROWSER_MAX_FILES) {
-            break;
+
+        f_closedir (&dir);
+        if (fr == FR_OK) {
+            return 1;
         }
-        strncpy (s_browser_files[s_browser_count],
-                 (const char *)fno.fname,
-                 (size_t)(ZX_BROWSER_NAME_MAX - 1u));
-        s_browser_files[s_browser_count][ZX_BROWSER_NAME_MAX - 1u] = '\0';
-        ++s_browser_count;
+        Delay_Ms (80u);
     }
 
-    f_closedir (&dir);
-    return 1;
+    printf("z80select: scan failed for '%s' (fr=%d)\r\n", target, (int)fr);
+    return 0;
 }
 
-static void ZX_BrowserBuildPath (char *out, size_t out_size, const char *dir, const char *name) {
+static int ZX_BrowserRender (const char *path, uint8_t selected);
+
+static int ZX_BrowserRenderRetry (const char *path, uint8_t selected) {
+    uint8_t retry;
+
+    for (retry = 0u; retry < ZX_BROWSER_RENDER_RETRIES; ++retry) {
+        if (ZX_BrowserRender (path, selected)) {
+            return 1;
+        }
+        Delay_Ms (80u);
+    }
+    return 0;
+}
+
+static int ZX_BrowserBuildPath (char *out, size_t out_size, const char *dir, const char *name) {
     const char *base = ((dir != NULL) && (dir[0] != '\0')) ? dir : "/";
     size_t len = strlen (base);
+    int written;
 
     if ((len > 0u) && (base[len - 1u] == '/')) {
-        (void)snprintf (out, out_size, "%s%s", base, name);
+        written = snprintf (out, out_size, "%s%s", base, name);
     } else if ((len == 1u) && (base[0] == '/')) {
-        (void)snprintf (out, out_size, "/%s", name);
+        written = snprintf (out, out_size, "/%s", name);
     } else {
-        (void)snprintf (out, out_size, "%s/%s", base, name);
+        written = snprintf (out, out_size, "%s/%s", base, name);
     }
+
+    if ((written < 0) || ((size_t)written >= out_size)) {
+        if (out_size != 0u) {
+            out[out_size - 1u] = '\0';
+        }
+        return 0;
+    }
+    return 1;
 }
 
 static int ZX_BrowserRender (const char *path, uint8_t selected) {
@@ -666,7 +706,7 @@ static int ZX_BrowserRender (const char *path, uint8_t selected) {
     char line[ZX_TERM_COLS + 1u];
 
     ZX_TermModelClear();
-    ZX_TermModelWriteAt (0u, 0u, "Z80 FILE SELECTOR", normal_attr);
+    ZX_TermModelWriteAt (0u, 0u, "RIKSY SPECCY", normal_attr);
     ZX_TermModelWriteAt (1u, 0u, ((path != NULL) && (path[0] != '\0')) ? path : "/", normal_attr);
     ZX_TermModelWriteAt (2u, 0u, "Q/A MOVE  O/P PAGE", normal_attr);
     ZX_TermModelWriteAt (3u, 0u, "ENTER RUN", normal_attr);
@@ -864,9 +904,9 @@ void ZX_TerminalCommandTermWrite (char *firstToken) {
 
 void ZX_TerminalCommandZ80Select (const char *path) {
     uint8_t selected = 0u;
-    char full_path[128];
+    uint8_t suppress_enter_loops = 0u;
+    char full_path[ZX_BROWSER_PATH_MAX];
     int draw_suspended = 0;
-    uint8_t render_attempt;
 
     s_z80select_pending[0] = '\0';
 
@@ -875,6 +915,7 @@ void ZX_TerminalCommandZ80Select (const char *path) {
         goto done;
     }
 
+    s_selector_font_mode = 1u;
     ZX_CartDrawSuspend();
     Delay_Ms (50u);
     draw_suspended = 1;
@@ -882,19 +923,9 @@ void ZX_TerminalCommandZ80Select (const char *path) {
     if (!ZX_BrowserLoadFiles (path)) {
         goto done;
     }
-    if (!ZX_BrowserRender (path, selected)) {
-        /* Startup can race zxprog mailbox readiness right after reset.
-           Keep retrying briefly before giving up. */
-        for (render_attempt = 0u; render_attempt < 20u; ++render_attempt) {
-            Delay_Ms (80u);
-            if (ZX_BrowserRender (path, selected)) {
-                break;
-            }
-        }
-        if (render_attempt == 20u) {
-            printf("ERR: z80select draw failed\r\n");
-            goto done;
-        }
+    if (!ZX_BrowserRenderRetry (path, selected)) {
+        printf("ERR: z80select draw failed\r\n");
+        goto done;
     }
     if (s_browser_count == 0u) {
         printf("z80select: no .z80 files\r\n");
@@ -912,6 +943,9 @@ void ZX_TerminalCommandZ80Select (const char *path) {
             goto done;
         }
         if (rc == 0) {
+            if (suppress_enter_loops > 0u) {
+                --suppress_enter_loops;
+            }
             Delay_Ms (20u);
             continue;
         }
@@ -919,21 +953,21 @@ void ZX_TerminalCommandZ80Select (const char *path) {
         if ((key == 'q') || (key == 'Q')) {
             if (selected > 0u) {
                 --selected;
-                if (!ZX_BrowserRender (path, selected)) {
-                    printf("ERR: z80select redraw failed\r\n");
-                    goto done;
+                if (!ZX_BrowserRenderRetry (path, selected)) {
+                    printf("WARN: z80select redraw timeout\r\n");
                 }
             }
+            suppress_enter_loops = 0u;
             continue;
         }
         if ((key == 'a') || (key == 'A')) {
             if ((uint16_t)selected + 1u < s_browser_count) {
                 ++selected;
-                if (!ZX_BrowserRender (path, selected)) {
-                    printf("ERR: z80select redraw failed\r\n");
-                    goto done;
+                if (!ZX_BrowserRenderRetry (path, selected)) {
+                    printf("WARN: z80select redraw timeout\r\n");
                 }
             }
+            suppress_enter_loops = 0u;
             continue;
         }
         if ((key == 'o') || (key == 'O')) {
@@ -942,10 +976,10 @@ void ZX_TerminalCommandZ80Select (const char *path) {
             } else {
                 selected = 0u;
             }
-            if (!ZX_BrowserRender (path, selected)) {
-                printf("ERR: z80select redraw failed\r\n");
-                goto done;
+            if (!ZX_BrowserRenderRetry (path, selected)) {
+                printf("WARN: z80select redraw timeout\r\n");
             }
+            suppress_enter_loops = 20u;
             continue;
         }
         if ((key == 'p') || (key == 'P')) {
@@ -954,14 +988,20 @@ void ZX_TerminalCommandZ80Select (const char *path) {
                 next = (s_browser_count == 0u) ? 0u : (uint16_t)(s_browser_count - 1u);
             }
             selected = (uint8_t)next;
-            if (!ZX_BrowserRender (path, selected)) {
-                printf("ERR: z80select redraw failed\r\n");
-                goto done;
+            if (!ZX_BrowserRenderRetry (path, selected)) {
+                printf("WARN: z80select redraw timeout\r\n");
             }
+            suppress_enter_loops = 20u;
             continue;
         }
         if (key == '\n') {
-            ZX_BrowserBuildPath (full_path, sizeof (full_path), path, s_browser_files[selected]);
+            if (suppress_enter_loops > 0u) {
+                continue;
+            }
+            if (!ZX_BrowserBuildPath (full_path, sizeof (full_path), path, s_browser_files[selected])) {
+                printf("z80select: path too long, cannot open\r\n");
+                continue;
+            }
             printf("z80select: selected %s\r\n", full_path);
             strncpy (s_z80select_pending, full_path, sizeof (s_z80select_pending) - 1u);
             s_z80select_pending[sizeof (s_z80select_pending) - 1u] = '\0';
@@ -970,6 +1010,7 @@ void ZX_TerminalCommandZ80Select (const char *path) {
     }
 
 done:
+    s_selector_font_mode = 0u;
     if (draw_suspended) {
         ZX_TerminalMarkBridgeDirty();
         ZX_CartDrawResume();
