@@ -2,7 +2,7 @@
  *  .z80 v1 body loader.
  *
  *  This module only copies the 49152-byte snapshot body into ZX RAM
- *  (0x4000..0xFFFF) via BUSREQ writes. It does not launch code, restore
+ *  (0x4000..0xFFFF) via NMI mailbox writes. It does not launch code, restore
  *  CPU state, or perform ROMCS handover.
  */
 
@@ -96,7 +96,7 @@ static int z80_reader_get (Z80Reader *r, uint8_t *out) {
     return 1;
 }
 
-/* ===== Body output (chunked BUSREQ write to ZX RAM) ================ */
+/* ===== Body output (chunked NMI mailbox write to ZX RAM) =========== */
 
 #define Z80L_OUT_CHUNK 256u
 
@@ -116,7 +116,7 @@ static void z80_out_init (Z80OutState *o) {
 static int z80_out_flush (Z80OutState *o) {
     if (o->out_pos == 0u) { return 1; }
     if (!ZX_BusWriteBlock (o->base, o->out_buf, o->out_pos)) {
-        printf ("z80: BUSREQ write failed @0x%04X\r\n", (unsigned)o->base);
+        printf ("z80: NMI write failed @0x%04X\r\n", (unsigned)o->base);
         return 0;
     }
     o->base   = (uint16_t)(o->base + o->out_pos);
@@ -235,10 +235,10 @@ int Z80_LoadAndRun (const char *path) {
     rc = z80_open_and_parse (path, &fp, &h);
     if (rc != Z80L_OK) { return rc; }
 
-        printf ("z80: copying body (%s) to RAM via BUSREQ\r\n",
+        printf ("z80: copying body (%s) to RAM via NMI mailbox\r\n",
             h.compressed ? "compressed" : "raw");
 
-    /* Stream 49152-byte body via BUSREQ to 0x4000..0xFFFF.
+    /* Stream 49152-byte body via NMI mailbox to 0x4000..0xFFFF.
        zxprog BSS is in cart RAM (0x3000..0x3FFF), never clobbered. */
     z80_reader_init (&rd, &fp);
     z80_out_init (&out);
@@ -249,7 +249,7 @@ int Z80_LoadAndRun (const char *path) {
         return Z80L_ERR_LOAD;
     }
     f_close (&fp);
-    printf ("z80: body streamed (%lu bytes via BUSREQ)\r\n",
+    printf ("z80: body streamed (%lu bytes via NMI mailbox)\r\n",
             (unsigned long)out.total);
     printf ("z80: RAM body copy complete; launch/state-restore disabled.\r\n");
     return Z80L_OK;

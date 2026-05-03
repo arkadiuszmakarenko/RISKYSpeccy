@@ -14,7 +14,7 @@
 /* Print a header summary without touching ZX RAM. */
 int Z80_Info (const char *path);
 
-/* Stream only the v1 .z80 body to ZX RAM via BUSREQ (0x4000..0xFFFF).
+/* Stream only the v1 .z80 body to ZX RAM via NMI mailbox (0x4000..0xFFFF).
    No CPU-state restore or launch/handover is performed. */
 int Z80_LoadAndRun (const char *path);
 

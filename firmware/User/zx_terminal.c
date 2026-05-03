@@ -25,7 +25,7 @@
 #define ZX_TERM_COLS          32u
 #define ZX_TERM_ROWS          24u
 #define ZX_TERM_NMI_TO        220u
-#define ZX_BUSREQ_WRITE_CHUNK 64u
+#define ZX_SCREEN_WRITE_CHUNK 64u
 
 #define ZX_BROWSER_MAX_FILES    64u
 #define ZX_BROWSER_NAME_MAX     48u
@@ -173,10 +173,10 @@ static int ZX_BusWriteChunked (uint16_t base_addr, const uint8_t *buffer, uint16
 
     while (offset < length) {
         uint16_t chunk = (uint16_t)(length - offset);
-        if (chunk > ZX_BUSREQ_WRITE_CHUNK) {
-            chunk = ZX_BUSREQ_WRITE_CHUNK;
+        if (chunk > ZX_SCREEN_WRITE_CHUNK) {
+            chunk = ZX_SCREEN_WRITE_CHUNK;
         }
-        /* Keep BUSREQ hold short to avoid long Z80 stall windows. */
+        /* Keep chunk size modest to avoid long mailbox service latency. */
         if (!ZX_BusWriteBlock ((uint16_t)(base_addr + offset), &buffer[offset], chunk)) {
             return 0;
         }

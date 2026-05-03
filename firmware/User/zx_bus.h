@@ -12,8 +12,6 @@ int ZX_BusWriteBlock (uint16_t address, const uint8_t *buffer, uint16_t length);
 int ZX_CartRamReadBlock (uint16_t address, uint8_t *buffer, uint16_t length);
 int ZX_CartRamWriteBlock (uint16_t address, const uint8_t *buffer, uint16_t length);
 void ZX_TriggerNMI (void);
-int ZX_BusAcquireDbg (uint32_t *cycles_out);
-void ZX_BusReleaseDbg (void);
 
 /* Poll next ZX key event published by zxprog (ASCII-ish code).
    Returns 1 when a new key is available, 0 when no new key, -1 on read error. */
@@ -41,16 +39,5 @@ int  ZX_SnapshotCommitDual (uint16_t handover_addr_a,
 
 /* Returns 0xFFFF when launch/handover is disabled. */
 uint16_t ZX_SnapshotHandoverFiredAddr (void);
-
-/* Passive bus tracer. Captures up to 128 MREQ-low events into a ring buffer.
-   Use sequence:
-       ZX_BusTraceArm();   Delay_Ms(N);   ZX_BusTraceStop();
-       ZX_BusTraceDump();
-   Reads address bus (GPIOE), data bus (GPIOD), M1/RD/WR (GPIOB). */
-void ZX_BusTraceArm    (void);
-void ZX_BusTraceSample (uint32_t loop_budget);
-void ZX_BusTraceStop   (void);
-void ZX_BusTraceDump   (void);
-
 
 #endif

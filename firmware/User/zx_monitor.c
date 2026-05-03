@@ -1,6 +1,6 @@
 #include "zx_monitor.h"
 
-#include "zx_bus.h"
+#include "debug.h"
 #include "z80_loader.h"
 #include "zx_terminal.h"
 #include "ff.h"
@@ -11,10 +11,6 @@
 #include <string.h>
 
 #define ZX_MONITOR_BUF_SIZE 96u
-#define ZX_DUMP_MAX_LEN     256u
-#define ZX_VIEW_MAX_BYTES   16u
-#define ZX_CART_RAM_BASE    0x3000u
-#define ZX_CART_RAM_LAST    0x3FFFu
 
 static char s_monitor_line[ZX_MONITOR_BUF_SIZE];
 static uint8_t s_monitor_len = 0u;
@@ -51,197 +47,19 @@ static int ZX_StrIeq (const char *a, const char *b) {
     return (*a == '\0') && (*b == '\0');
 }
 
-static int ZX_ParseU32 (const char *text, uint32_t *value) {
-    char *end = NULL;
-    unsigned long parsed;
-
-    if (text == NULL) {
-        return 0;
-    }
-
-    parsed = strtoul (text, &end, 0);
-    if ((end == text) || (*end != '\0')) {
-        return 0;
-    }
-
-    *value = (uint32_t)parsed;
-    return 1;
-}
-
-static int ZX_ParseAddressHex (const char *text, uint32_t *value) {
-    char *end = NULL;
-    unsigned long parsed;
-
-    if (text == NULL) {
-        return 0;
-    }
-
-    parsed = strtoul (text, &end, 16);
-    if ((end == text) || (*end != '\0')) {
-        return 0;
-    }
-
-    *value = (uint32_t)parsed;
-    return 1;
-}
-
 static void ZX_PrintHelp (void) {
     printf("Commands:\r\n");
     printf("  help                         - show commands\r\n");
-    printf("  dump <addr> <len>            - dump region (addr hex, len dec/0x)\r\n");
-    printf("  rd <addr> [len]              - read byte(s), addr is hex\r\n");
-    printf("  wd <addr> <byte>             - write byte (addr/byte hex, or byte dec/0x)\r\n");
-    printf("  wfill <addr> <byte> <len>    - fill range (addr/byte hex, len dec/0x)\r\n");
-    printf("  suspend                      - pause ZX screen drawing\r\n");
-    printf("  resume                       - resume ZX screen drawing\r\n");
-    printf("  zxview <addr> [len]          - show live ZX RAM bytes on screen\r\n");
-    printf("  zxmsg <text>                 - send text to ZX on-screen host bridge\r\n");
-    printf("  zxttyinit                    - init MPU-side terminal and clear screen\r\n");
-    printf("  zxtty <text>                 - write text/escapes (\\n \\r \\t \\e[...m) via MPU\r\n");
-    printf("  keyread                      - read one ZX key event from mailbox\r\n");
-    printf("  nmi                          - trigger NMI pulse\r\n");
     printf("  ls [path]                    - list directory on USB drive\r\n");
     printf("  z80info <path>               - parse .z80 v1 snapshot header\r\n");
-    printf("  z80run <path>                - copy .z80 body to RAM via BUSREQ (no launch)\r\n");
-    printf("  z80run-bus|z80run-nmi <path> - aliases of z80run (same BUSREQ copy path)\r\n");
+    printf("  z80run <path>                - copy .z80 body to RAM via NMI mailbox (no launch)\r\n");
+    printf("  z80run-nmi <path>            - alias of z80run (same NMI copy path)\r\n");
     printf("  z80select [path]             - browse USB .z80 files on ZX screen and run\r\n");
     printf("  romcs <on|off>               - assert/release cart ROMCS manually\r\n");
 }
 
-static void ZX_CommandViewOff (void) {
-    ZX_TerminalCommandViewOff();
-}
-
-static void ZX_CommandView (uint16_t address, uint8_t length) {
-    ZX_TerminalCommandView (address, length);
-}
-
-static void ZX_CommandBridgeText (char *firstToken) {
-    ZX_TerminalCommandBridgeText (firstToken);
-}
-
-static void ZX_CommandTermInit (void) {
-    ZX_TerminalCommandTermInit();
-}
-
-static void ZX_CommandTermWrite (char *firstToken) {
-    ZX_TerminalCommandTermWrite (firstToken);
-}
-
-static void ZX_CommandKeyRead (void) {
-    uint8_t key = 0u;
-    int rc = ZX_KeyPoll (&key);
-    if (rc < 0) {
-        printf("ERR: key mailbox read failed\r\n");
-        return;
-    }
-    if (rc == 0) {
-        printf("No key event\r\n");
-        return;
-    }
-
-    if ((key >= 32u) && (key <= 126u)) {
-        printf("KEY: 0x%02X '%c'\r\n", (unsigned)key, (char)key);
-    } else {
-        printf("KEY: 0x%02X\r\n", (unsigned)key);
-    }
-}
-
 static void ZX_CommandZ80Select (const char *path) {
     ZX_TerminalCommandZ80Select (path);
-}
-
-static void ZX_PrintHexLine (uint16_t address, const uint8_t *buffer, uint16_t count) {
-    uint16_t i;
-    printf("%04X: ", (unsigned)address);
-    for (i = 0u; i < count; ++i) {
-        printf("%02X ", (unsigned)buffer[i]);
-    }
-    printf("\r\n");
-}
-
-static void ZX_CommandDump (uint16_t address, uint16_t length) {
-    uint8_t block[16];
-    uint16_t remaining = length;
-
-    while (remaining > 0u) {
-        uint16_t chunk = (remaining > (uint16_t)sizeof (block)) ? (uint16_t)sizeof (block) : remaining;
-        if (!ZX_BusReadBlock (address, block, chunk)) {
-            printf("ERR: dump failed at 0x%04X\r\n", (unsigned)address);
-            return;
-        }
-
-        ZX_PrintHexLine (address, block, chunk);
-        address = (uint16_t)(address + chunk);
-        remaining = (uint16_t)(remaining - chunk);
-    }
-}
-
-static void ZX_CommandRead (uint16_t address, uint16_t length) {
-    if (length == 1u) {
-        uint8_t value = 0u;
-        if (!ZX_BusReadBlock (address, &value, 1u)) {
-            printf("ERR: rd failed\r\n");
-            return;
-        }
-        printf("RD 0x%04X = 0x%02X\r\n", (unsigned)address, (unsigned)value);
-        return;
-    }
-
-    ZX_CommandDump (address, length);
-}
-
-static void ZX_CommandWrite (uint16_t address, uint8_t value) {
-    uint8_t verify = 0u;
-
-    if (!ZX_BusWriteBlock (address, &value, 1u)) {
-        printf("ERR: wd failed\r\n");
-        return;
-    }
-
-    if (!ZX_BusReadBlock (address, &verify, 1u)) {
-        printf("WR 0x%04X <= 0x%02X (verify read failed)\r\n", (unsigned)address, (unsigned)value);
-        return;
-    }
-
-    printf("WR 0x%04X <= 0x%02X", (unsigned)address, (unsigned)value);
-    if (verify == value) {
-        printf(" OK\r\n");
-    } else {
-        printf(" MISMATCH read=0x%02X\r\n", (unsigned)verify);
-    }
-}
-
-static void ZX_CommandFill (uint16_t address, uint8_t value, uint16_t length) {
-    uint8_t buffer[16];
-    uint16_t remaining = length;
-    uint16_t chunk_size;
-    uint16_t i;
-
-    if (length == 0u) {
-        printf("ERR: fill length must be > 0\r\n");
-        return;
-    }
-
-    for (i = 0u; i < (uint16_t)sizeof (buffer); ++i) {
-        buffer[i] = value;
-    }
-
-    while (remaining > 0u) {
-        chunk_size = (remaining > (uint16_t)sizeof (buffer)) ? (uint16_t)sizeof (buffer) : remaining;
-        if (!ZX_BusWriteBlock (address, buffer, chunk_size)) {
-            printf("ERR: fill failed at 0x%04X\r\n", (unsigned)address);
-            return;
-        }
-        address = (uint16_t)(address + chunk_size);
-        remaining = (uint16_t)(remaining - chunk_size);
-    }
-
-    printf("Filled 0x%04X..0x%04X with 0x%02X (%u bytes)\r\n",
-           (unsigned)(address - length),
-           (unsigned)(address - 1u),
-           (unsigned)value,
-           (unsigned)length);
 }
 
 static void ZX_CommandLs (const char *path) {
@@ -278,9 +96,6 @@ static void ZX_CommandLs (const char *path) {
 static void ZX_ExecuteCommand (char *line) {
     char *cmd = strtok (line, " \t");
     char *a0;
-    char *a1;
-    uint32_t v0;
-    uint32_t v1;
 
     if (cmd == NULL) {
         return;
@@ -288,155 +103,6 @@ static void ZX_ExecuteCommand (char *line) {
 
     if (ZX_StrIeq (cmd, "help") || ZX_StrIeq (cmd, "?")) {
         ZX_PrintHelp();
-        return;
-    }
-
-    if (ZX_StrIeq (cmd, "nmi")) {
-        ZX_TriggerNMI();
-        printf("NMI pulse sent\r\n");
-        return;
-    }
-
-    if (ZX_StrIeq (cmd, "zxmsg")) {
-        a0 = strtok (NULL, " \t");
-        ZX_CommandBridgeText (a0);
-        return;
-    }
-
-    if (ZX_StrIeq (cmd, "zxttyinit")) {
-        ZX_CommandTermInit();
-        return;
-    }
-
-    if (ZX_StrIeq (cmd, "zxtty")) {
-        a0 = strtok (NULL, " \t");
-        ZX_CommandTermWrite (a0);
-        return;
-    }
-
-    if (ZX_StrIeq (cmd, "keyread")) {
-        ZX_CommandKeyRead();
-        return;
-    }
-
-    if (ZX_StrIeq (cmd, "zxview")) {
-        a0 = strtok (NULL, " \t");
-        a1 = strtok (NULL, " \t");
-
-        if ((a0 != NULL) && ZX_StrIeq (a0, "off")) {
-            ZX_CommandViewOff();
-            return;
-        }
-
-        if (!ZX_ParseAddressHex (a0, &v0)) {
-            printf("Usage: zxview <addr> [len] | zxview off\r\n");
-            return;
-        }
-
-        if (a1 == NULL) {
-            v1 = ZX_VIEW_MAX_BYTES;
-        } else if (!ZX_ParseU32 (a1, &v1) || (v1 == 0u)) {
-            printf("Usage: zxview <addr> [len] | zxview off\r\n");
-            return;
-        }
-
-        if (v1 > ZX_VIEW_MAX_BYTES) {
-            v1 = ZX_VIEW_MAX_BYTES;
-        }
-
-        ZX_CommandView ((uint16_t)v0, (uint8_t)v1);
-        return;
-    }
-
-    if (ZX_StrIeq (cmd, "dump")) {
-        a0 = strtok (NULL, " \t");
-        a1 = strtok (NULL, " \t");
-        if (!ZX_ParseAddressHex (a0, &v0) || !ZX_ParseU32 (a1, &v1) || (v1 == 0u)) {
-            printf("Usage: dump <addr> <len>\r\n");
-            return;
-        }
-        if (v1 > ZX_DUMP_MAX_LEN) {
-            v1 = ZX_DUMP_MAX_LEN;
-        }
-        ZX_CommandDump ((uint16_t)v0, (uint16_t)v1);
-        return;
-    }
-
-    if (ZX_StrIeq (cmd, "rd")) {
-        a0 = strtok (NULL, " \t");
-        a1 = strtok (NULL, " \t");
-        if (!ZX_ParseAddressHex (a0, &v0)) {
-            printf("Usage: rd <addr> [len]\r\n");
-            return;
-        }
-        if (a1 != NULL) {
-            if (!ZX_ParseU32 (a1, &v1) || (v1 == 0u)) {
-                printf("Usage: rd <addr> [len]\r\n");
-                return;
-            }
-            if (v1 > ZX_DUMP_MAX_LEN) {
-                v1 = ZX_DUMP_MAX_LEN;
-            }
-            ZX_CommandRead ((uint16_t)v0, (uint16_t)v1);
-        } else {
-            ZX_CommandRead ((uint16_t)v0, 1u);
-        }
-        return;
-    }
-
-    if (ZX_StrIeq (cmd, "wd")) {
-        a0 = strtok (NULL, " \t");
-        a1 = strtok (NULL, " \t");
-        if (!ZX_ParseAddressHex (a0, &v0)) {
-            printf("Usage: wd <addr> <byte>\r\n");
-            return;
-        }
-        if (!ZX_ParseAddressHex (a1, &v1)) {
-            if (!ZX_ParseU32 (a1, &v1)) {
-                printf("Usage: wd <addr> <byte>\r\n");
-                return;
-            }
-        }
-        ZX_CommandWrite ((uint16_t)v0, (uint8_t)v1);
-        return;
-    }
-
-    if (ZX_StrIeq (cmd, "wfill")) {
-        a0 = strtok (NULL, " \t");
-        char *a2 = strtok (NULL, " \t");
-        a1 = strtok (NULL, " \t");
-        if (!ZX_ParseAddressHex (a0, &v0) || a2 == NULL || a1 == NULL) {
-            printf("Usage: wfill <addr> <byte> <len>\r\n");
-            return;
-        }
-        if (!ZX_ParseAddressHex (a2, &v1)) {
-            if (!ZX_ParseU32 (a2, &v1)) {
-                printf("Usage: wfill <addr> <byte> <len>\r\n");
-                return;
-            }
-        }
-        uint32_t len = 0u;
-        if (!ZX_ParseU32 (a1, &len) || (len == 0u)) {
-            printf("Usage: wfill <addr> <byte> <len>\r\n");
-            return;
-        }
-        if (len > 0x1000u) {
-            printf("ERR: max fill length is 0x1000 (4096)\r\n");
-            return;
-        }
-        ZX_CommandFill ((uint16_t)v0, (uint8_t)v1, (uint16_t)len);
-        return;
-    }
-
-    if (ZX_StrIeq (cmd, "suspend")) {
-        ZX_CartDrawSuspend();
-        printf("ZX screen drawing suspended\r\n");
-        return;
-    }
-
-    if (ZX_StrIeq (cmd, "resume")) {
-        ZX_CartDrawResume();
-        printf("ZX screen drawing resumed\r\n");
         return;
     }
 
@@ -453,7 +119,7 @@ static void ZX_ExecuteCommand (char *line) {
         return;
     }
 
-    if (ZX_StrIeq (cmd, "z80run-bus") || ZX_StrIeq (cmd, "z80run-nmi") || ZX_StrIeq (cmd, "z80run")) {
+    if (ZX_StrIeq (cmd, "z80run-nmi") || ZX_StrIeq (cmd, "z80run")) {
         a0 = strtok (NULL, " \t");
         if ((a0 == NULL) || (a0[0] == '\0')) { printf("Usage: z80run <path>\r\n"); return; }
         (void)Z80_LoadAndRun (a0);
@@ -487,9 +153,8 @@ void ZX_Monitor_Init (void) {
     setvbuf (stdout, NULL, _IONBF, 0);
      ZX_TerminalInit();
 
-    printf("ZX monitor ready. BUSREQ/BUSACK memory access enabled.\r\n");
+    printf("ZX monitor ready.\r\n");
     printf("Clock sync uses GPIOB.13 inverted ZX clock edges.\r\n");
-    printf("Address arguments are HEX (e.g. 3000, 3FFF, 0x3000).\r\n");
     ZX_PrintHelp();
     printf("> ");
 }
