@@ -1,9 +1,11 @@
 /*
- *  .z80 v1 body loader.
+ *  .z80 v1/v2/v3 snapshot loader.
  *
- *  This module only copies the 49152-byte snapshot body into ZX RAM
- *  (0x4000..0xFFFF) via NMI mailbox writes. It does not launch code, restore
- *  CPU state, or perform ROMCS handover.
+ *  v1: 30-byte header, flat 49152-byte body (optional RLE compression).
+ *  v2: 30-byte base header + 2-byte ext-len + 23-byte ext header + paged blocks.
+ *  v3: 30-byte base header + 2-byte ext-len + 54/55-byte ext header + paged blocks.
+ *
+ *  Only 48K hardware modes are supported.  128K/+2/+3 snapshots are rejected.
  */
 
 #include "z80_loader.h"
@@ -19,7 +21,7 @@
 #define Z80L_LOADER_FLAG_BORDER_ANIM 0x01u
 
 
-/* Header bytes used by the .z80 v1 spec (offsets from start of file). */
+/* Header bytes used by the .z80 spec (offsets from start of file). */
 typedef struct {
     uint8_t  a, f;
     uint16_t bc, hl, pc, sp;
@@ -35,9 +37,11 @@ typedef struct {
     int      compressed;
     uint8_t  border;
     uint8_t  im;
+    uint8_t  version;         /* 1, 2, or 3 */
+    uint8_t  hw_mode;         /* v2/v3 extended header byte 2 */
 } Z80Header;
 
-static int z80_parse_header (const uint8_t *h, Z80Header *out) {
+static void z80_parse_base_header (const uint8_t *h, Z80Header *out) {
     out->a       = h[0];
     out->f       = h[1];
     out->bc      = (uint16_t)h[2] | ((uint16_t)h[3] << 8);
@@ -61,8 +65,54 @@ static int z80_parse_header (const uint8_t *h, Z80Header *out) {
     out->compressed = (out->flags1 & 0x20u) ? 1 : 0;
     out->border  = (uint8_t)((out->flags1 >> 1) & 0x07u);
     out->im      = (uint8_t)(out->flags2 & 0x03u);
-    return (out->pc != 0u) ? 1 : 0;   /* pc==0 means v2/v3 extended header */
+    out->version = (out->pc != 0u) ? 1u : 0u;  /* 0 = need ext header */
+    out->hw_mode = 0u;
 }
+
+/*
+ * Read v2/v3 extended header.  File must be positioned at offset 30.
+ * Accepted ext-header lengths: 23 (v2), 54 or 55 (v3).
+ * Sets h->version, h->pc, h->hw_mode.
+ */
+static int z80_read_ext_header (FIL *fp, Z80Header *h) {
+    uint8_t  len_bytes[2];
+    uint8_t  ext[55];
+    UINT     got;
+    FRESULT  fr;
+    uint16_t ext_len;
+    UINT     to_read;
+
+    fr = f_read (fp, len_bytes, 2u, &got);
+    if ((fr != FR_OK) || (got != 2u)) { return 0; }
+    ext_len = (uint16_t)len_bytes[0] | ((uint16_t)len_bytes[1] << 8);
+
+    if ((ext_len != 23u) && (ext_len != 54u) && (ext_len != 55u)) {
+        printf ("z80: unknown ext header len %u\r\n", (unsigned)ext_len);
+        return 0;
+    }
+    h->version = (ext_len == 23u) ? 2u : 3u;
+
+    to_read = (UINT)ext_len;   /* ext_len <= 55, fits in ext[] */
+    fr = f_read (fp, ext, to_read, &got);
+    if ((fr != FR_OK) || (got != to_read)) { return 0; }
+
+    h->pc      = (uint16_t)ext[0] | ((uint16_t)ext[1] << 8);
+    h->hw_mode = ext[2];
+    return 1;
+}
+
+/*
+ * v2 hardware mode: 0=48K, 1=48K+IF1, 2=SamRam, 3+=128K
+ * v3 hardware mode: 0=48K, 1=48K+IF1, 2=48K+MGT, 3=SamRam, 4+=128K
+ * Accept only modes that map to plain 48K RAM layout.
+ */
+static int z80_is_48k (const Z80Header *h) {
+    if (h->version == 1u) { return 1; }
+    if (h->version == 2u) { return (h->hw_mode <= 1u); }
+    if (h->version == 3u) { return (h->hw_mode <= 2u); }
+    return 0;
+}
+
 
 
 /* ===== Buffered stream reader ==================================== */
@@ -107,7 +157,7 @@ typedef struct {
     uint16_t base;         /* current ZX target address  */
     uint16_t out_pos;      /* bytes in out_buf            */
     uint8_t  out_buf[Z80L_OUT_CHUNK];
-    uint32_t total;
+    uint32_t total;        /* bytes emitted in current block/pass */
 } Z80OutState;
 
 static void z80_out_init (Z80OutState *o) {
@@ -138,11 +188,15 @@ static int z80_out_emit (Z80OutState *o, uint8_t b) {
 
 /* ===== Body decompression / streaming ============================ */
 
-/* v1 compressed format: bytes of the original 49152-byte body, except runs
-   of N copies of value V are encoded as `ED ED N V` (when N > 4 or any
-   sequence containing ED ED in the original).  A literal `ED` is emitted
-   as-is unless followed by another `ED` (then it's a run header).
-   End marker for a compressed body is `00 ED ED 00`. */
+/*
+ * v1 compressed format: bytes are stored raw except runs of N copies of V
+ * are encoded as `ED ED N V`.  End marker for a compressed v1 body is
+ * the 4-byte sequence 00 ED ED 00 (a zero-length run).
+ * v2/v3 per-block compression uses the same scheme but spans exactly one
+ * 16384-byte page; block_len == 0xFFFF means uncompressed (always 16384 bytes).
+ */
+
+/* --- v1 flat body ------------------------------------------------ */
 static int z80_stream_body (Z80Reader *r, Z80OutState *o, int compressed) {
     if (!compressed) {
         uint32_t i;
@@ -184,7 +238,144 @@ static int z80_stream_body (Z80Reader *r, Z80OutState *o, int compressed) {
     return z80_out_flush (o);
 }
 
-/* ===== Public API ================================================ */
+/* --- v2/v3 paged block streaming --------------------------------- */
+
+#define Z80L_BLOCK_LEN  16384u
+#define Z80L_BLOCK_RAW  0xFFFFu
+
+/* Map .z80 page number to 48K ZX RAM base address. Returns 0 for unknown. */
+static uint16_t z80_page_to_addr (uint8_t page) {
+    switch (page) {
+        case 4u: return 0x8000u;   /* RAM page 2 */
+        case 5u: return 0xC000u;   /* RAM page 5 (top) */
+        case 8u: return 0x4000u;   /* RAM page 5 in 48K = screen RAM */
+        default: return 0x0000u;   /* ROM or unsupported page */
+    }
+}
+
+/*
+ * Decompress (or raw-copy) one 16384-byte page from r into ZX RAM at o->base.
+ * block_len == 0xFFFF  → raw 16384-byte block.
+ * block_len < 0xFFFF   → RLE-compressed data occupying block_len bytes,
+ *                         expanding to exactly 16384 output bytes.
+ */
+static int z80_stream_block (Z80Reader *r, Z80OutState *o, uint16_t block_len) {
+    o->out_pos = 0u;
+    o->total   = 0u;
+
+    if (block_len == Z80L_BLOCK_RAW) {
+        uint16_t i;
+        for (i = 0u; i < Z80L_BLOCK_LEN; ++i) {
+            uint8_t b;
+            if (!z80_reader_get (r, &b)) { return 0; }
+            if (!z80_out_emit (o, b)) { return 0; }
+        }
+        return z80_out_flush (o);
+    }
+
+    /* Compressed: decompress until exactly 16384 output bytes. */
+    while (o->total < Z80L_BLOCK_LEN) {
+        uint8_t b;
+        if (!z80_reader_get (r, &b)) { return 0; }
+        if (b != 0xEDu) {
+            if (!z80_out_emit (o, b)) { return 0; }
+            continue;
+        }
+        {
+            uint8_t b2;
+            if (!z80_reader_get (r, &b2)) { return 0; }
+            if (b2 != 0xEDu) {
+                if (!z80_out_emit (o, 0xEDu)) { return 0; }
+                if (!z80_out_emit (o, b2))    { return 0; }
+                continue;
+            }
+        }
+        {
+            uint8_t cnt, val;
+            if (!z80_reader_get (r, &cnt)) { return 0; }
+            if (!z80_reader_get (r, &val)) { return 0; }
+            while (cnt-- > 0u) {
+                if (o->total >= Z80L_BLOCK_LEN) { break; }
+                if (!z80_out_emit (o, val)) { return 0; }
+            }
+        }
+    }
+    return z80_out_flush (o);
+}
+
+/*
+ * Skip `byte_count` bytes from the reader (used to discard unknown pages).
+ */
+static int z80_skip_bytes (Z80Reader *r, uint16_t byte_count) {
+    uint16_t i;
+    for (i = 0u; i < byte_count; ++i) {
+        uint8_t dummy;
+        if (!z80_reader_get (r, &dummy)) { return 0; }
+    }
+    return 1;
+}
+
+/*
+ * Process all paged blocks from a v2/v3 body.
+ * Reads block headers (len_lo, len_hi, page) until EOF and dispatches
+ * known 48K pages (4, 5, 8) to ZX RAM; unknown pages are skipped.
+ * Returns 1 if all three 48K pages were loaded successfully.
+ */
+static int z80_stream_v2v3_body (Z80Reader *r, Z80OutState *o) {
+    uint8_t got_page4 = 0u;
+    uint8_t got_page5 = 0u;
+    uint8_t got_page8 = 0u;
+
+    for (;;) {
+        uint8_t  h0, h1, h2;
+        uint16_t block_len;
+        uint8_t  page;
+        uint16_t zx_addr;
+
+        /* Read 3-byte block header; first byte EOF = normal end of blocks. */
+        if (!z80_reader_get (r, &h0)) { break; }
+        if (!z80_reader_get (r, &h1)) {
+            printf ("z80: truncated block header\r\n");
+            return 0;
+        }
+        if (!z80_reader_get (r, &h2)) {
+            printf ("z80: truncated block header\r\n");
+            return 0;
+        }
+
+        block_len = (uint16_t)h0 | ((uint16_t)h1 << 8);
+        page      = h2;
+        zx_addr   = z80_page_to_addr (page);
+
+        if (zx_addr == 0x0000u) {
+            /* ROM or unknown page: skip its bytes */
+            uint16_t skip = (block_len == Z80L_BLOCK_RAW) ? Z80L_BLOCK_LEN : block_len;
+            printf ("z80: skipping page %u (%u bytes)\r\n",
+                    (unsigned)page, (unsigned)skip);
+            if (!z80_skip_bytes (r, skip)) { return 0; }
+            continue;
+        }
+
+        o->base = zx_addr;
+        if (!z80_stream_block (r, o, block_len)) {
+            printf ("z80: block load failed (page %u → 0x%04X)\r\n",
+                    (unsigned)page, (unsigned)zx_addr);
+            return 0;
+        }
+        printf ("z80: page %u → 0x%04X\r\n", (unsigned)page, (unsigned)zx_addr);
+
+        if (page == 4u) { got_page4 = 1u; }
+        else if (page == 5u) { got_page5 = 1u; }
+        else if (page == 8u) { got_page8 = 1u; }
+    }
+
+    if ((got_page4 == 0u) || (got_page5 == 0u) || (got_page8 == 0u)) {
+        printf ("z80: missing pages (4=%u 5=%u 8=%u)\r\n",
+                (unsigned)got_page4, (unsigned)got_page5, (unsigned)got_page8);
+        return 0;
+    }
+    return 1;
+}
 
 static int z80_open_and_parse (const char *path, FIL *fp, Z80Header *out_hdr) {
     FRESULT fr = f_open (fp, path, FA_READ);
@@ -201,8 +392,18 @@ static int z80_open_and_parse (const char *path, FIL *fp, Z80Header *out_hdr) {
             f_close (fp);
             return Z80L_ERR_READ;
         }
-        if (!z80_parse_header (hdr, out_hdr)) {
-            printf ("z80: PC=0 in header \u2014 v2/v3 not supported in this build\r\n");
+        z80_parse_base_header (hdr, out_hdr);
+    }
+
+    if (out_hdr->version == 0u) {
+        if (!z80_read_ext_header (fp, out_hdr)) {
+            printf ("z80: failed to read extended header\r\n");
+            f_close (fp);
+            return Z80L_ERR_VERSION;
+        }
+        if (!z80_is_48k (out_hdr)) {
+            printf ("z80: hw_mode %u not supported (128K/SamRam?)\r\n",
+                    (unsigned)out_hdr->hw_mode);
             f_close (fp);
             return Z80L_ERR_VERSION;
         }
@@ -217,14 +418,18 @@ int Z80_Info (const char *path) {
     if (rc != Z80L_OK) { return rc; }
     f_close (&fp);
 
-    printf ("z80: v1 snapshot %s\r\n", path);
+    printf ("z80: v%u snapshot %s\r\n", (unsigned)h.version, path);
     printf ("  PC=%04X SP=%04X  A=%02X F=%02X BC=%04X DE=%04X HL=%04X\r\n",
             h.pc, h.sp, h.a, h.f, h.bc, h.de, h.hl);
     printf ("  A'=%02X F'=%02X BC'=%04X DE'=%04X HL'=%04X\r\n",
             h.a_alt, h.f_alt, h.bc_alt, h.de_alt, h.hl_alt);
-    printf ("  IX=%04X IY=%04X  I=%02X R=%02X  border=%u  IM=%u  IFF1=%u  %s\r\n",
-            h.ix, h.iy, h.i, h.r, h.border, h.im, h.iff1,
-            h.compressed ? "(compressed)" : "(uncompressed)");
+    printf ("  IX=%04X IY=%04X  I=%02X R=%02X  border=%u  IM=%u  IFF1=%u",
+            h.ix, h.iy, h.i, h.r, h.border, h.im, h.iff1);
+    if (h.version == 1u) {
+        printf ("  %s\r\n", h.compressed ? "(compressed)" : "(uncompressed)");
+    } else {
+        printf ("  hw_mode=%u (paged)\r\n", (unsigned)h.hw_mode);
+    }
     return Z80L_OK;
 }
 
@@ -241,8 +446,9 @@ int Z80_LoadAndRun (const char *path) {
     rc = z80_open_and_parse (path, &fp, &h);
     if (rc != Z80L_OK) { return rc; }
 
-    printf ("z80: copying body (%s) to RAM via NMI mailbox\r\n",
-            h.compressed ? "compressed" : "raw");
+    printf ("z80: copying body (v%u, %s) to RAM via NMI mailbox\r\n",
+            (unsigned)h.version,
+            (h.version == 1u) ? (h.compressed ? "compressed" : "raw") : "paged");
 
     /* Enable ZX-side loading border animation only for snapshot body transfer. */
     loader_flags = Z80L_LOADER_FLAG_BORDER_ANIM;
@@ -252,16 +458,24 @@ int Z80_LoadAndRun (const char *path) {
         return Z80L_ERR_LOAD;
     }
 
-    /* Stream 49152-byte body via NMI mailbox to 0x4000..0xFFFF.
-       zxprog BSS is in cart RAM (0x3000..0x3FFF), never clobbered. */
+    /* Stream body via NMI mailbox.
+       v1: flat 49152-byte body to 0x4000..0xFFFF.
+       v2/v3: series of 16384-byte pages dispatched to their ZX addresses. */
     z80_reader_init (&rd, &fp);
     z80_out_init (&out);
-    if (!z80_stream_body (&rd, &out, h.compressed)) {
-        printf ("z80: body stream failed (%lu bytes)\r\n",
-                (unsigned long)out.total);
-        (void)ZX_CartRamWriteBlock (Z80L_LOADER_FLAGS_ADDR, &loader_flags_clear, 1u);
-        f_close (&fp);
-        return Z80L_ERR_LOAD;
+    {
+        int body_ok;
+        if (h.version == 1u) {
+            body_ok = z80_stream_body (&rd, &out, h.compressed);
+        } else {
+            body_ok = z80_stream_v2v3_body (&rd, &out);
+        }
+        if (!body_ok) {
+            printf ("z80: body stream failed\r\n");
+            (void)ZX_CartRamWriteBlock (Z80L_LOADER_FLAGS_ADDR, &loader_flags_clear, 1u);
+            f_close (&fp);
+            return Z80L_ERR_LOAD;
+        }
     }
     f_close (&fp);
     (void)ZX_CartRamWriteBlock (Z80L_LOADER_FLAGS_ADDR, &loader_flags_clear, 1u);
