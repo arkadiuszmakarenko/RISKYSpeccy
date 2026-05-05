@@ -32,9 +32,9 @@ static void Handle_ResetButtonPA7 (void) {
             level = ((GPIOA->INDR & GPIO_Pin_7) != 0u) ? 1u : 0u;
             if (level != idle_level) {
                 press_armed = 0u;
-                printf("PA7 reset button pressed: resetting ZX + cart\r\n");
+                printf ("PA7 reset button pressed: resetting ZX + cart\r\n");
                 ZX_RomcsAssert();
-              //  ZX_Z80Reset();
+                //  ZX_Z80Reset();
                 NVIC_SystemReset();
             }
         }
@@ -57,15 +57,15 @@ int main (void) {
     {
         FRESULT fr = f_mount (&s_fatfs, "", 0);
         if (fr != FR_OK) {
-            printf("WARN: f_mount failed (fr=%d) — USB drive features disabled\r\n",
-                   (int)fr);
+            printf ("WARN: f_mount failed (fr=%d) — USB drive features disabled\r\n",
+                    (int)fr);
         }
     }
 
     ZX_Monitor_Init();
-    ZX_Monitor_AutoStartZ80Select();
+    // ZX_Monitor_AutoStartZ80Select();
 
-    printf("Hello from RISKY ZX Spectrum firmware!\n");
+    printf ("Hello from RISKY ZX Spectrum firmware!\n");
 
     while (1) {
         Handle_ResetButtonPA7();

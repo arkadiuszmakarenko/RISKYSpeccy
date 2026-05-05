@@ -4,6 +4,7 @@
 #include "z80_loader.h"
 #include "zx_bus.h"
 #include "zx_terminal.h"
+#include "tape_player.h"
 #include "ff.h"
 
 #include <ctype.h>
@@ -86,6 +87,8 @@ static void ZX_PrintHelp (void) {
     printf("  z80run-nmi <path>            - alias of z80run (same NMI copy path)\r\n");
     printf("  z80select [path]             - browse USB .z80 files on ZX screen and run\r\n");
     printf("  romcs <on|off>               - assert/release cart ROMCS manually\r\n");
+    printf("  tapplay <path>               - load .tap, reset Spectrum, play tape on #FE EAR\r\n");
+    printf("  tapstop                      - stop tape playback\r\n");
 }
 
 static void ZX_CommandZ80Select (const char *path) {
@@ -166,6 +169,41 @@ static void ZX_ExecuteCommand (char *line) {
             (void)Z80_LoadAndRun (pending);
             ZX_TerminalClearPendingZ80Selection();
         }
+        return;
+    }
+
+    if (ZX_StrIeq (cmd, "tapplay")) {
+        char ch;
+        a0 = strtok (NULL, " \t");
+        if ((a0 == NULL) || (a0[0] == '\0')) {
+            printf ("Usage: tapplay <path>\r\n");
+            return;
+        }
+        if (!TAP_Player_Load (a0)) {
+            return;
+        }
+        /* Release cart ROM so the ZX ULA ROM becomes visible, then reset
+           the Z80 so it boots to the Spectrum BASIC prompt (~1.2 s).   */
+        ZX_RomcsRelease();
+        ZX_Z80Reset();
+        printf ("Spectrum ready.  Type LOAD \"\" on the Spectrum keyboard,\r\n");
+        printf ("then press Enter here to start tape playback: ");
+        /* Wait for Enter on the UART console — keyboard still works on
+           the Spectrum since the IORQ ISR is not yet active.           */
+        while (1) {
+            if (ZX_UartTryReadChar (&ch)) {
+                if ((ch == '\r') || (ch == '\n')) {
+                    break;
+                }
+            }
+        }
+        printf ("\r\n");
+        TAP_Player_Start();
+        return;
+    }
+
+    if (ZX_StrIeq (cmd, "tapstop")) {
+        TAP_Player_Stop();
         return;
     }
 
