@@ -2,6 +2,7 @@
 
 #include "debug.h"
 #include "ff.h"
+#include "tape_player.h"
 #include "z80_loader.h"
 #include "zx_bus.h"
 
@@ -56,13 +57,18 @@ static uint8_t s_term_csi_count = 0u;
 static uint8_t s_term_csi_building = 0u;
 static uint8_t s_term_csi_value = 0u;
 static uint8_t s_selector_font_mode = 0u;
+static uint8_t s_browser_mode = 0u;
 static char s_browser_files[ZX_BROWSER_MAX_FILES][ZX_BROWSER_NAME_MAX];
 static uint8_t s_browser_is_dir[ZX_BROWSER_MAX_FILES];
 static uint8_t s_browser_count = 0u;
 static char s_z80select_pending[ZX_BROWSER_PATH_MAX];
+static char s_tapselect_pending[ZX_BROWSER_PATH_MAX];
 static char s_browser_path_stack[3][ZX_BROWSER_PATH_MAX];
 static uint8_t s_browser_selected_stack[3];
 static uint8_t s_browser_stack_depth = 0u;
+
+#define ZX_BROWSER_MODE_Z80 0u
+#define ZX_BROWSER_MODE_TAP 1u
 
 static const uint8_t s_font4x7_chars[] =
     " 0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ-.:/_";
@@ -616,6 +622,23 @@ static int ZX_HasZ80Extension (const char *name) {
            (tolower ((unsigned char)name[3]) == '0');
 }
 
+static int ZX_HasTapExtension (const char *name) {
+    size_t len;
+
+    if (name == NULL) {
+        return 0;
+    }
+    len = strlen (name);
+    if (len < 4u) {
+        return 0;
+    }
+    name += (len - 4u);
+    return (tolower ((unsigned char)name[0]) == '.') &&
+           (tolower ((unsigned char)name[1]) == 't') &&
+           (tolower ((unsigned char)name[2]) == 'a') &&
+           (tolower ((unsigned char)name[3]) == 'p');
+}
+
 static int ZX_BrowserLoadFiles (const char *path) {
     DIR dir;
     FILINFO fno;
@@ -651,7 +674,7 @@ static int ZX_BrowserLoadFiles (const char *path) {
             continue;
         }
 
-        /* Pass 2: .z80 files */
+        /* Pass 2: files for the active selector mode */
         fr = f_opendir (&dir, target);
         if (fr != FR_OK) {
             Delay_Ms (80u);
@@ -661,7 +684,12 @@ static int ZX_BrowserLoadFiles (const char *path) {
             fr = f_readdir (&dir, &fno);
             if ((fr != FR_OK) || (fno.fname[0] == '\0')) { break; }
             if ((fno.fattrib & AM_DIR) != 0u) { continue; }
-            if (!ZX_HasZ80Extension ((const char *)fno.fname)) { continue; }
+            if (s_browser_mode == ZX_BROWSER_MODE_TAP) {
+                if (!ZX_HasTapExtension ((const char *)fno.fname)) { continue; }
+            } else {
+                if (!ZX_HasZ80Extension ((const char *)fno.fname) &&
+                    !ZX_HasTapExtension ((const char *)fno.fname)) { continue; }
+            }
             if (s_browser_count >= ZX_BROWSER_MAX_FILES) { break; }
             strncpy (s_browser_files[s_browser_count],
                      (const char *)fno.fname,
@@ -677,7 +705,10 @@ static int ZX_BrowserLoadFiles (const char *path) {
         Delay_Ms (80u);
     }
 
-    printf("z80select: scan failed for '%s' (fr=%d)\r\n", target, (int)fr);
+    printf("%s: scan failed for '%s' (fr=%d)\r\n",
+           (s_browser_mode == ZX_BROWSER_MODE_TAP) ? "tapselect" : "z80select",
+           target,
+           (int)fr);
     return 0;
 }
 
@@ -717,7 +748,7 @@ static int ZX_BrowserShowLoadError (const char *path, int rc) {
     const char *msg = ZX_Z80LoadErrorText (rc);
 
     ZX_TermModelClear();
-    ZX_TermModelWriteAt (0u, 0u, "RIKSY SPECCY", normal_attr);
+    ZX_TermModelWriteAt (0u, 0u, "RISKY SPECCY", normal_attr);
     ZX_TermModelWriteAt (2u, 0u, "Z80 LOAD ERROR", alert_attr);
     ZX_TermModelWriteAt (4u, 0u, msg, normal_attr);
     ZX_TermModelWriteAt (6u, 0u, "FILE:", normal_attr);
@@ -730,6 +761,24 @@ static int ZX_BrowserShowLoadError (const char *path, int rc) {
 
     ZX_TermModelWriteAt (12u, 0u, "PRESS ANY KEY", normal_attr);
     ZX_TermModelWriteAt (13u, 0u, "TO RESET MENU", normal_attr);
+
+    return ZX_TermCommit();
+}
+
+static int ZX_BrowserShowTapReady (const char *path) {
+    uint8_t normal_attr = (uint8_t)((7u << 3) | 0u);
+    uint8_t alert_attr = (uint8_t)((1u << 3) | 7u);
+
+    ZX_TermModelClear();
+    ZX_TermModelWriteAt (0u, 0u, "RISKY SPECCY", normal_attr);
+    ZX_TermModelWriteAt (2u, 0u, "TAP READY", alert_attr);
+    ZX_TermModelWriteAt (4u, 0u, "TYPE LOAD \"\"", normal_attr);
+    ZX_TermModelWriteAt (5u, 0u, "AND PRESS ENTER", normal_attr);
+    ZX_TermModelWriteAt (7u, 0u, "SHORT-PRESS PLAY/RESET BUTTON TO PLAY", normal_attr);
+    ZX_TermModelWriteAt (9u, 0u, "PRESS ANY KEY", normal_attr);
+    ZX_TermModelWriteAt (10u, 0u, "TO LOAD BASIC", normal_attr);
+    ZX_TermModelWriteAt (13u, 0u, "FILE:", normal_attr);
+    ZX_TermModelWriteAt (14u, 0u, (path != NULL) ? path : "(unknown)", normal_attr);
 
     return ZX_TermCommit();
 }
@@ -777,13 +826,15 @@ static int ZX_BrowserRender (const char *path, uint8_t selected) {
     char line[ZX_TERM_COLS + 1u];
 
     ZX_TermModelClear();
-    ZX_TermModelWriteAt (0u, 0u, "RIKSY SPECCY", normal_attr);
+    ZX_TermModelWriteAt (0u, 0u, "RISKY SPECCY", normal_attr);
     ZX_TermModelWriteAt (1u, 0u, ((path != NULL) && (path[0] != '\0')) ? path : "/", normal_attr);
     ZX_TermModelWriteAt (2u, 0u, "Q/A MOVE  O/P PAGE", normal_attr);
     if (s_browser_stack_depth > 0u) {
         ZX_TermModelWriteAt (3u, 0u, "ENTER OPEN  0 BACK", normal_attr);
     } else {
-        ZX_TermModelWriteAt (3u, 0u, "ENTER RUN/OPEN", normal_attr);
+        ZX_TermModelWriteAt (3u, 0u,
+                             (s_browser_mode == ZX_BROWSER_MODE_TAP) ? "ENTER QUEUE/OPEN" : "ENTER LOAD/OPEN",
+                             normal_attr);
     }
 
     if (s_browser_count == 0u) {
@@ -840,6 +891,7 @@ void ZX_TerminalInit (void) {
     ZX_TermCsiReset();
     ZX_TermModelClear();
     s_z80select_pending[0] = '\0';
+    s_tapselect_pending[0] = '\0';
 }
 
 void ZX_TerminalMarkBridgeDirty (void) {
@@ -993,6 +1045,7 @@ void ZX_TerminalCommandZ80Select (const char *path) {
     char cur_path[ZX_BROWSER_PATH_MAX];
     int draw_suspended = 0;
 
+    s_browser_mode = ZX_BROWSER_MODE_Z80;
     s_z80select_pending[0] = '\0';
     s_browser_stack_depth = 0u;
     strncpy (cur_path, ((path != NULL) && (path[0] != '\0')) ? path : "/",
@@ -1017,7 +1070,7 @@ void ZX_TerminalCommandZ80Select (const char *path) {
         goto done;
     }
 
-    printf("z80select: Q/A move, O/P page, ENTER run/open, 0 back\r\n");
+    printf("z80select: Q/A move, O/P page, ENTER load/open, 0 back\r\n");
 
     for (;;) {
         uint8_t key = 0u;
@@ -1135,28 +1188,57 @@ void ZX_TerminalCommandZ80Select (const char *path) {
                 printf("z80select: path too long, cannot open\r\n");
                 continue;
             }
-            printf("z80select: loading %s\r\n", full_path);
-            {
-                int load_rc = Z80_LoadAndRun (full_path);
-                if (load_rc == Z80L_OK) {
-                    s_z80select_pending[0] = '\0';
-                    goto done;
+            if (ZX_HasTapExtension (s_browser_files[selected])) {
+                TAP_Player_Stop();
+                if (!TAP_Player_Load (full_path)) {
+                    printf("z80select: tap prepare failed for %s\r\n", full_path);
+                    suppress_enter_loops = 20u;
+                    continue;
                 }
 
-                printf("z80select: load failed (rc=%d)\r\n", load_rc);
-                if (!ZX_BrowserShowLoadError (full_path, load_rc)) {
-                    printf("WARN: z80select error screen draw timeout\r\n");
+                strncpy (s_tapselect_pending, full_path, (size_t)(ZX_BROWSER_PATH_MAX - 1u));
+                s_tapselect_pending[ZX_BROWSER_PATH_MAX - 1u] = '\0';
+
+                if (!ZX_BrowserShowTapReady (full_path)) {
+                    printf("WARN: z80select tap-ready draw timeout\r\n");
                 }
+                printf("z80select: queued tap %s\r\n", full_path);
+                printf("z80select: type LOAD \"\" and press Enter on the Spectrum, then short-press Play/Reset button to start playback\r\n");
+                printf("z80select: press any Spectrum key now to return to BASIC\r\n");
                 ZX_WaitAnyKey();
+                s_selector_font_mode = 0u;
+                if (draw_suspended) {
+                    ZX_TerminalMarkBridgeDirty();
+                    ZX_CartDrawResume();
+                    draw_suspended = 0;
+                }
+                ZX_RomcsRelease();
+                ZX_Z80Reset();
+                goto done;
+            } else {
+                printf("z80select: loading %s\r\n", full_path);
+                {
+                    int load_rc = Z80_LoadAndRun (full_path);
+                    if (load_rc == Z80L_OK) {
+                        s_z80select_pending[0] = '\0';
+                        goto done;
+                    }
 
-                selected = 0u;
-                if (!ZX_BrowserLoadFiles (cur_path)) {
-                    goto done;
+                    printf("z80select: load failed (rc=%d)\r\n", load_rc);
+                    if (!ZX_BrowserShowLoadError (full_path, load_rc)) {
+                        printf("WARN: z80select error screen draw timeout\r\n");
+                    }
+                    ZX_WaitAnyKey();
+
+                    selected = 0u;
+                    if (!ZX_BrowserLoadFiles (cur_path)) {
+                        goto done;
+                    }
+                    if (!ZX_BrowserRenderRetry (cur_path, selected)) {
+                        printf("WARN: z80select redraw timeout\r\n");
+                    }
+                    suppress_enter_loops = 20u;
                 }
-                if (!ZX_BrowserRenderRetry (cur_path, selected)) {
-                    printf("WARN: z80select redraw timeout\r\n");
-                }
-                suppress_enter_loops = 20u;
             }
             continue;
         }
@@ -1170,12 +1252,206 @@ done:
     }
 }
 
+void ZX_TerminalCommandTapSelect (const char *path) {
+    uint8_t selected = 0u;
+    uint8_t suppress_enter_loops = 0u;
+    char full_path[ZX_BROWSER_PATH_MAX];
+    char cur_path[ZX_BROWSER_PATH_MAX];
+    int draw_suspended = 0;
+    int go_to_basic = 0;
+
+    s_browser_mode = ZX_BROWSER_MODE_TAP;
+    s_tapselect_pending[0] = '\0';
+    s_browser_stack_depth = 0u;
+    strncpy (cur_path, ((path != NULL) && (path[0] != '\0')) ? path : "/",
+             (size_t)(ZX_BROWSER_PATH_MAX - 1u));
+    cur_path[ZX_BROWSER_PATH_MAX - 1u] = '\0';
+
+    if (!ZX_WaitNmiMailboxReady (3000u)) {
+        printf("ERR: tapselect mailbox not ready\r\n");
+        goto done;
+    }
+
+    s_selector_font_mode = 1u;
+    ZX_CartDrawSuspend();
+    Delay_Ms (50u);
+    draw_suspended = 1;
+
+    if (!ZX_BrowserLoadFiles (cur_path)) {
+        goto done;
+    }
+    if (!ZX_BrowserRenderRetry (cur_path, selected)) {
+        printf("ERR: tapselect draw failed\r\n");
+        goto done;
+    }
+
+    printf("tapselect: Q/A move, O/P page, ENTER queue/open, 0 back\r\n");
+
+    for (;;) {
+        uint8_t key = 0u;
+        int rc = ZX_KeyPoll (&key);
+
+        if (rc < 0) {
+            printf("ERR: key mailbox read failed\r\n");
+            goto done;
+        }
+        if (rc == 0) {
+            if (suppress_enter_loops > 0u) {
+                --suppress_enter_loops;
+            }
+            Delay_Ms (20u);
+            continue;
+        }
+
+        if ((key == 'q') || (key == 'Q')) {
+            if (selected > 0u) {
+                --selected;
+                if (!ZX_BrowserRenderRetry (cur_path, selected)) {
+                    printf("WARN: tapselect redraw timeout\r\n");
+                }
+            }
+            suppress_enter_loops = 0u;
+            continue;
+        }
+        if ((key == 'a') || (key == 'A')) {
+            if ((uint16_t)selected + 1u < s_browser_count) {
+                ++selected;
+                if (!ZX_BrowserRenderRetry (cur_path, selected)) {
+                    printf("WARN: tapselect redraw timeout\r\n");
+                }
+            }
+            suppress_enter_loops = 0u;
+            continue;
+        }
+        if ((key == 'o') || (key == 'O')) {
+            if (selected >= ZX_BROWSER_PAGE_ROWS) {
+                selected = (uint8_t)(selected - ZX_BROWSER_PAGE_ROWS);
+            } else {
+                selected = 0u;
+            }
+            if (!ZX_BrowserRenderRetry (cur_path, selected)) {
+                printf("WARN: tapselect redraw timeout\r\n");
+            }
+            suppress_enter_loops = 20u;
+            continue;
+        }
+        if ((key == 'p') || (key == 'P')) {
+            uint16_t next = (uint16_t)selected + ZX_BROWSER_PAGE_ROWS;
+            if (next >= s_browser_count) {
+                next = (s_browser_count == 0u) ? 0u : (uint16_t)(s_browser_count - 1u);
+            }
+            selected = (uint8_t)next;
+            if (!ZX_BrowserRenderRetry (cur_path, selected)) {
+                printf("WARN: tapselect redraw timeout\r\n");
+            }
+            suppress_enter_loops = 20u;
+            continue;
+        }
+        if (key == '0') {
+            if (s_browser_stack_depth > 0u) {
+                --s_browser_stack_depth;
+                strncpy (cur_path,
+                         s_browser_path_stack[s_browser_stack_depth],
+                         (size_t)(ZX_BROWSER_PATH_MAX - 1u));
+                cur_path[ZX_BROWSER_PATH_MAX - 1u] = '\0';
+                selected = s_browser_selected_stack[s_browser_stack_depth];
+                if (!ZX_BrowserLoadFiles (cur_path)) {
+                    goto done;
+                }
+                if (!ZX_BrowserRenderRetry (cur_path, selected)) {
+                    printf("WARN: tapselect redraw timeout\r\n");
+                }
+            }
+            suppress_enter_loops = 0u;
+            continue;
+        }
+        if (key != '\n') {
+            continue;
+        }
+        if (suppress_enter_loops > 0u) {
+            continue;
+        }
+        if ((s_browser_count > 0u) && (s_browser_is_dir[selected] != 0u)) {
+            if (s_browser_stack_depth < 3u) {
+                char new_path[ZX_BROWSER_PATH_MAX];
+                if (!ZX_BrowserBuildPath (new_path, sizeof (new_path),
+                                          cur_path, s_browser_files[selected])) {
+                    printf("tapselect: path too long\r\n");
+                    continue;
+                }
+                strncpy (s_browser_path_stack[s_browser_stack_depth],
+                         cur_path,
+                         (size_t)(ZX_BROWSER_PATH_MAX - 1u));
+                s_browser_path_stack[s_browser_stack_depth][ZX_BROWSER_PATH_MAX - 1u] = '\0';
+                s_browser_selected_stack[s_browser_stack_depth] = selected;
+                ++s_browser_stack_depth;
+                strncpy (cur_path, new_path, (size_t)(ZX_BROWSER_PATH_MAX - 1u));
+                cur_path[ZX_BROWSER_PATH_MAX - 1u] = '\0';
+                selected = 0u;
+                if (!ZX_BrowserLoadFiles (cur_path)) {
+                    goto done;
+                }
+                if (!ZX_BrowserRenderRetry (cur_path, selected)) {
+                    printf("WARN: tapselect redraw timeout\r\n");
+                }
+            } else {
+                printf("tapselect: max folder depth reached\r\n");
+            }
+            suppress_enter_loops = 20u;
+            continue;
+        }
+        if (!ZX_BrowserBuildPath (full_path, sizeof (full_path), cur_path, s_browser_files[selected])) {
+            printf("tapselect: path too long, cannot queue\r\n");
+            continue;
+        }
+
+        TAP_Player_Stop();
+        if (!TAP_Player_Load (full_path)) {
+            printf("tapselect: prepare failed for %s\r\n", full_path);
+            suppress_enter_loops = 20u;
+            continue;
+        }
+
+        strncpy (s_tapselect_pending, full_path, (size_t)(ZX_BROWSER_PATH_MAX - 1u));
+        s_tapselect_pending[ZX_BROWSER_PATH_MAX - 1u] = '\0';
+
+        if (!ZX_BrowserShowTapReady (full_path)) {
+            printf("WARN: tapselect ready screen draw timeout\r\n");
+        }
+        printf("tapselect: queued %s\r\n", full_path);
+        printf("tapselect: type LOAD \"\" and press Enter on the Spectrum, then short-press BUTTON to start playback\r\n");
+        printf("tapselect: press any Spectrum key now to return to BASIC\r\n");
+        ZX_WaitAnyKey();
+        go_to_basic = 1;
+        goto done;
+    }
+
+done:
+    s_selector_font_mode = 0u;
+    if (draw_suspended) {
+        ZX_TerminalMarkBridgeDirty();
+        ZX_CartDrawResume();
+    }
+    if (go_to_basic) {
+        ZX_RomcsRelease();
+        ZX_Z80Reset();
+    }
+}
+
 const char *ZX_TerminalPendingZ80Selection (void) {
     return s_z80select_pending;
 }
 
 void ZX_TerminalClearPendingZ80Selection (void) {
     s_z80select_pending[0] = '\0';
+}
+
+const char *ZX_TerminalPendingTapSelection (void) {
+    return s_tapselect_pending;
+}
+
+void ZX_TerminalClearPendingTapSelection (void) {
+    s_tapselect_pending[0] = '\0';
 }
 
 

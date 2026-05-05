@@ -429,4 +429,8 @@ int TAP_Player_IsRunning (void) {
     return (int)s_running;
 }
 
+int TAP_Player_HasTapeLoaded (void) {
+    return (s_tap_total != 0u) ? 1 : 0;
+}
+
 #pragma GCC pop_options

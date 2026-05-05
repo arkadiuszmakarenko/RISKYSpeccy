@@ -46,6 +46,9 @@ void TAP_Player_Stop (void);
 /* Returns 1 while tape is playing, 0 when done or stopped. */
 int TAP_Player_IsRunning (void);
 
+/* Returns 1 when a tape image is buffered and ready to start. */
+int TAP_Player_HasTapeLoaded (void);
+
 /* ISR prototypes — placed in .text.fastirq via tape_player.c */
 void TAP_IorqISR  (void) __attribute__ ((interrupt ("WCH-Interrupt-fast")));
 void TAP_TimerISR (void) __attribute__ ((interrupt ("WCH-Interrupt-fast")));

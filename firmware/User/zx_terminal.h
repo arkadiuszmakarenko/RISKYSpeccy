@@ -11,9 +11,12 @@ void ZX_TerminalCommandBridgeText (char *firstToken);
 void ZX_TerminalCommandTermInit (void);
 void ZX_TerminalCommandTermWrite (char *firstToken);
 void ZX_TerminalCommandZ80Select (const char *path);
+void ZX_TerminalCommandTapSelect (const char *path);
 
 const char *ZX_TerminalPendingZ80Selection (void);
 void ZX_TerminalClearPendingZ80Selection (void);
+const char *ZX_TerminalPendingTapSelection (void);
+void ZX_TerminalClearPendingTapSelection (void);
 void ZX_TerminalMarkBridgeDirty (void);
 
 #endif

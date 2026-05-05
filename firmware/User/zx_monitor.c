@@ -20,6 +20,7 @@ static uint8_t s_autostart_done = 0u;
 static uint8_t s_autostart_pending = 0u;
 
 static void ZX_CommandZ80Select (const char *path);
+static void ZX_CommandTapSelect (const char *path);
 
 static void ZX_TryAutoStartZ80Select (void) {
     const char *pending;
@@ -86,13 +87,18 @@ static void ZX_PrintHelp (void) {
     printf("  z80run <path>                - copy .z80 body to RAM via NMI mailbox (no launch)\r\n");
     printf("  z80run-nmi <path>            - alias of z80run (same NMI copy path)\r\n");
     printf("  z80select [path]             - browse USB .z80 files on ZX screen and run\r\n");
+    printf("  tapselect [path]             - browse USB .tap files on ZX screen and queue one\r\n");
     printf("  romcs <on|off>               - assert/release cart ROMCS manually\r\n");
-    printf("  tapplay <path>               - load .tap, reset Spectrum, play tape on #FE EAR\r\n");
+    printf("  tapplay [path]               - start queued .tap or load one and start now\r\n");
     printf("  tapstop                      - stop tape playback\r\n");
 }
 
 static void ZX_CommandZ80Select (const char *path) {
     ZX_TerminalCommandZ80Select (path);
+}
+
+static void ZX_CommandTapSelect (const char *path) {
+    ZX_TerminalCommandTapSelect (path);
 }
 
 static void ZX_CommandLs (const char *path) {
@@ -172,32 +178,35 @@ static void ZX_ExecuteCommand (char *line) {
         return;
     }
 
-    if (ZX_StrIeq (cmd, "tapplay")) {
-        char ch;
+    if (ZX_StrIeq (cmd, "tapselect")) {
+        const char *pending;
         a0 = strtok (NULL, " \t");
-        if ((a0 == NULL) || (a0[0] == '\0')) {
-            printf ("Usage: tapplay <path>\r\n");
-            return;
+        ZX_CommandTapSelect (a0);
+        pending = ZX_TerminalPendingTapSelection();
+        if ((pending != NULL) && (pending[0] != '\0')) {
+            printf ("tapselect: queued %s\r\n", pending);
+            printf ("tapselect: type LOAD \"\" and press Enter on the Spectrum, then short-press Play/Reset button to start playback\r\n");
         }
-        if (!TAP_Player_Load (a0)) {
-            return;
-        }
-        /* Release cart ROM so the ZX ULA ROM becomes visible, then reset
-           the Z80 so it boots to the Spectrum BASIC prompt (~1.2 s).   */
-        ZX_RomcsRelease();
-        ZX_Z80Reset();
-        printf ("Spectrum ready.  Type LOAD \"\" on the Spectrum keyboard,\r\n");
-        printf ("then press Enter here to start tape playback: ");
-        /* Wait for Enter on the UART console — keyboard still works on
-           the Spectrum since the IORQ ISR is not yet active.           */
-        while (1) {
-            if (ZX_UartTryReadChar (&ch)) {
-                if ((ch == '\r') || (ch == '\n')) {
-                    break;
-                }
+        return;
+    }
+
+    if (ZX_StrIeq (cmd, "tapplay")) {
+        a0 = strtok (NULL, " \t");
+        if ((a0 != NULL) && (a0[0] != '\0')) {
+            if (!TAP_Player_Load (a0)) {
+                return;
             }
         }
-        printf ("\r\n");
+
+        if (!TAP_Player_HasTapeLoaded()) {
+            printf ("Usage: tapplay <path> or select one with tapselect first\r\n");
+            return;
+        }
+        if (TAP_Player_IsRunning()) {
+            printf ("tap: already playing\r\n");
+            return;
+        }
+
         TAP_Player_Start();
         return;
     }
