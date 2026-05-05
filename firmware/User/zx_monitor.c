@@ -86,10 +86,10 @@ static void ZX_PrintHelp (void) {
     printf("  z80info <path>               - parse .z80 v1 snapshot header\r\n");
     printf("  z80run <path>                - copy .z80 body to RAM via NMI mailbox (no launch)\r\n");
     printf("  z80run-nmi <path>            - alias of z80run (same NMI copy path)\r\n");
-    printf("  z80select [path]             - browse USB .z80 files on ZX screen and run\r\n");
-    printf("  tapselect [path]             - browse USB .tap files on ZX screen and queue one\r\n");
+    printf("  z80select [path]             - browse USB .z80/.tap/.tzx files on ZX screen\r\n");
+    printf("  tapselect [path]             - browse USB .tap/.tzx files on ZX screen and queue one\r\n");
     printf("  romcs <on|off>               - assert/release cart ROMCS manually\r\n");
-    printf("  tapplay [path]               - start queued .tap or load one and start now\r\n");
+    printf("  tapplay [path]               - start queued tape or load .tap/.tzx and start\r\n");
     printf("  tapstop                      - stop tape playback\r\n");
 }
 

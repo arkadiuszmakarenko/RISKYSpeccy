@@ -639,6 +639,23 @@ static int ZX_HasTapExtension (const char *name) {
            (tolower ((unsigned char)name[3]) == 'p');
 }
 
+static int ZX_HasTzxExtension (const char *name) {
+    size_t len;
+
+    if (name == NULL) {
+        return 0;
+    }
+    len = strlen (name);
+    if (len < 4u) {
+        return 0;
+    }
+    name += (len - 4u);
+    return (tolower ((unsigned char)name[0]) == '.') &&
+           (tolower ((unsigned char)name[1]) == 't') &&
+           (tolower ((unsigned char)name[2]) == 'z') &&
+           (tolower ((unsigned char)name[3]) == 'x');
+}
+
 static int ZX_BrowserLoadFiles (const char *path) {
     DIR dir;
     FILINFO fno;
@@ -685,10 +702,12 @@ static int ZX_BrowserLoadFiles (const char *path) {
             if ((fr != FR_OK) || (fno.fname[0] == '\0')) { break; }
             if ((fno.fattrib & AM_DIR) != 0u) { continue; }
             if (s_browser_mode == ZX_BROWSER_MODE_TAP) {
-                if (!ZX_HasTapExtension ((const char *)fno.fname)) { continue; }
+                if (!ZX_HasTapExtension ((const char *)fno.fname) &&
+                    !ZX_HasTzxExtension ((const char *)fno.fname)) { continue; }
             } else {
                 if (!ZX_HasZ80Extension ((const char *)fno.fname) &&
-                    !ZX_HasTapExtension ((const char *)fno.fname)) { continue; }
+                    !ZX_HasTapExtension ((const char *)fno.fname) &&
+                    !ZX_HasTzxExtension ((const char *)fno.fname)) { continue; }
             }
             if (s_browser_count >= ZX_BROWSER_MAX_FILES) { break; }
             strncpy (s_browser_files[s_browser_count],
@@ -1188,7 +1207,8 @@ void ZX_TerminalCommandZ80Select (const char *path) {
                 printf("z80select: path too long, cannot open\r\n");
                 continue;
             }
-            if (ZX_HasTapExtension (s_browser_files[selected])) {
+            if (ZX_HasTapExtension (s_browser_files[selected]) ||
+                ZX_HasTzxExtension (s_browser_files[selected])) {
                 TAP_Player_Stop();
                 if (!TAP_Player_Load (full_path)) {
                     printf("z80select: tap prepare failed for %s\r\n", full_path);

@@ -52,6 +52,7 @@
 #include "tape_player.h"
 #include "ff.h"
 
+#include <ctype.h>
 #include <string.h>
 #include <stdio.h>
 
@@ -122,6 +123,155 @@ static uint16_t           s_block_bytes_rem   = 0u;
 static uint8_t            s_cur_byte          = 0u;
 static uint8_t            s_cur_bit_mask      = 0u;
 static uint16_t           s_pause_count       = 0u;
+
+static int TAP_PathHasExtension (const char *path, const char *ext3) {
+    size_t len;
+
+    if ((path == NULL) || (ext3 == NULL)) {
+        return 0;
+    }
+    len = strlen (path);
+    if (len < 4u) {
+        return 0;
+    }
+    path += (len - 4u);
+    return (path[0] == '.') &&
+           (tolower ((unsigned char)path[1]) == (unsigned char)ext3[0]) &&
+           (tolower ((unsigned char)path[2]) == (unsigned char)ext3[1]) &&
+           (tolower ((unsigned char)path[3]) == (unsigned char)ext3[2]);
+}
+
+/* Convert supported TZX blocks to TAP-style blocks in-place in s_tap_buf.
+   Currently supported: 0x10 (standard speed data).
+   Ignored metadata/flow blocks: 0x20, 0x21, 0x22, 0x30, 0x31, 0x32, 0x33, 0x35, 0x5A.
+   Unsupported data-path/timing blocks (e.g. turbo/pure/CSW/direct) return 0. */
+static int TAP_ConvertTzxInPlace (uint32_t in_bytes, uint32_t *out_bytes) {
+    uint32_t rd = 10u;
+    uint32_t wr = 0u;
+    uint32_t converted_blocks = 0u;
+
+    if ((out_bytes == NULL) || (in_bytes < 10u)) {
+        return 0;
+    }
+
+    if ((memcmp (s_tap_buf, "ZXTape!\x1A", 8u) != 0) || (s_tap_buf[8] != 0x01u)) {
+        return 0;
+    }
+
+    while (rd < in_bytes) {
+        uint8_t id = s_tap_buf[rd];
+
+        switch (id) {
+        case 0x10u: {
+            uint16_t len;
+
+            if ((rd + 5u) > in_bytes) {
+                return 0;
+            }
+            len = (uint16_t)s_tap_buf[rd + 3u] |
+                  (uint16_t)((uint16_t)s_tap_buf[rd + 4u] << 8);
+            if ((rd + 5u + (uint32_t)len) > in_bytes) {
+                return 0;
+            }
+            if ((wr + 2u + (uint32_t)len) > TAP_BUF_SIZE) {
+                return 0;
+            }
+
+            s_tap_buf[wr] = (uint8_t)(len & 0xFFu);
+            s_tap_buf[wr + 1u] = (uint8_t)(len >> 8);
+            memmove (&s_tap_buf[wr + 2u], &s_tap_buf[rd + 5u], len);
+
+            wr += (uint32_t)len + 2u;
+            rd += (uint32_t)len + 5u;
+            ++converted_blocks;
+            break;
+        }
+
+        case 0x20u: /* pause */
+            if ((rd + 3u) > in_bytes) { return 0; }
+            rd += 3u;
+            break;
+
+        case 0x21u: { /* group start */
+            uint8_t n;
+            if ((rd + 2u) > in_bytes) { return 0; }
+            n = s_tap_buf[rd + 1u];
+            if ((rd + 2u + n) > in_bytes) { return 0; }
+            rd += 2u + n;
+            break;
+        }
+
+        case 0x22u: /* group end */
+            rd += 1u;
+            break;
+
+        case 0x30u: { /* text description */
+            uint8_t n;
+            if ((rd + 2u) > in_bytes) { return 0; }
+            n = s_tap_buf[rd + 1u];
+            if ((rd + 2u + n) > in_bytes) { return 0; }
+            rd += 2u + n;
+            break;
+        }
+
+        case 0x31u: { /* message block */
+            uint8_t n;
+            if ((rd + 3u) > in_bytes) { return 0; }
+            n = s_tap_buf[rd + 2u];
+            if ((rd + 3u + n) > in_bytes) { return 0; }
+            rd += 3u + n;
+            break;
+        }
+
+        case 0x32u: { /* archive info */
+            uint16_t n;
+            if ((rd + 3u) > in_bytes) { return 0; }
+            n = (uint16_t)s_tap_buf[rd + 1u] |
+                (uint16_t)((uint16_t)s_tap_buf[rd + 2u] << 8);
+            if ((rd + 3u + (uint32_t)n) > in_bytes) { return 0; }
+            rd += 3u + (uint32_t)n;
+            break;
+        }
+
+        case 0x33u: { /* hardware type */
+            uint8_t n;
+            if ((rd + 2u) > in_bytes) { return 0; }
+            n = s_tap_buf[rd + 1u];
+            if ((rd + 2u + (uint32_t)n * 3u) > in_bytes) { return 0; }
+            rd += 2u + (uint32_t)n * 3u;
+            break;
+        }
+
+        case 0x35u: { /* custom info */
+            uint32_t n;
+            if ((rd + 21u) > in_bytes) { return 0; }
+            n = (uint32_t)s_tap_buf[rd + 17u] |
+                ((uint32_t)s_tap_buf[rd + 18u] << 8) |
+                ((uint32_t)s_tap_buf[rd + 19u] << 16) |
+                ((uint32_t)s_tap_buf[rd + 20u] << 24);
+            if ((rd + 21u + n) > in_bytes) { return 0; }
+            rd += 21u + n;
+            break;
+        }
+
+        case 0x5Au: /* glue block */
+            if ((rd + 10u) > in_bytes) { return 0; }
+            rd += 10u;
+            break;
+
+        default:
+            printf ("tap: unsupported TZX block 0x%02X\r\n", (unsigned)id);
+            return 0;
+        }
+    }
+
+    if (converted_blocks == 0u) {
+        return 0;
+    }
+
+    *out_bytes = wr;
+    return 1;
+}
 
 /* ------------------------------------------------------------------ */
 /* Inline timer helper                                                  */
@@ -314,6 +464,8 @@ int TAP_Player_Load (const char *path) {
     FIL     fp;
     FRESULT fr;
     UINT    got;
+    uint32_t converted_bytes;
+    int is_tzx;
 
     s_tap_total = 0u;
     s_tap_pos   = 0u;
@@ -324,7 +476,7 @@ int TAP_Player_Load (const char *path) {
 
     fr = f_open (&fp, path, FA_READ);
     if (fr != FR_OK) {
-        printf ("tap: cannot open '%s' (err=%d)\r\n", path, (int)fr);
+        printf ("tape: cannot open '%s' (err=%d)\r\n", path, (int)fr);
         return 0;
     }
 
@@ -332,20 +484,36 @@ int TAP_Player_Load (const char *path) {
     f_close (&fp);
 
     if (fr != FR_OK) {
-        printf ("tap: read error (err=%d)\r\n", (int)fr);
+        printf ("tape: read error (err=%d)\r\n", (int)fr);
         return 0;
     }
     if (got == 0u) {
-        printf ("tap: file is empty\r\n");
+        printf ("tape: file is empty\r\n");
         return 0;
     }
     if (got == TAP_BUF_SIZE) {
-        printf ("tap: WARNING file truncated to %u bytes\r\n",
+        printf ("tape: WARNING file truncated to %u bytes\r\n",
                 (unsigned)TAP_BUF_SIZE);
     }
 
-    s_tap_total = (uint32_t)got;
-    printf ("tap: loaded %lu bytes from '%s'\r\n", (unsigned long)got, path);
+    is_tzx = TAP_PathHasExtension (path, "tzx");
+    if (is_tzx) {
+        if (!TAP_ConvertTzxInPlace ((uint32_t)got, &converted_bytes)) {
+            printf ("tape: unsupported or invalid .tzx '%s'\r\n", path);
+            return 0;
+        }
+        s_tap_total = converted_bytes;
+        printf ("tape: loaded .tzx '%s' (%lu bytes, converted to %lu TAP-stream bytes)\r\n",
+                path,
+                (unsigned long)got,
+                (unsigned long)converted_bytes);
+    } else {
+        s_tap_total = (uint32_t)got;
+        printf ("tape: loaded .tap '%s' (%lu bytes)\r\n",
+                path,
+                (unsigned long)got);
+    }
+
     return 1;
 }
 
