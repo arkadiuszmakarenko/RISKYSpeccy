@@ -433,6 +433,31 @@ int Z80_Info (const char *path) {
     return Z80L_OK;
 }
 
+int Z80_GetFileInfo (const char *path, Z80FileInfo *out) {
+    static FIL fp;
+    Z80Header h;
+    FILINFO fi;
+    int rc;
+
+    if (out == NULL) { return Z80L_ERR_FORMAT; }
+
+    rc = z80_open_and_parse (path, &fp, &h);
+    if (rc != Z80L_OK) { return rc; }
+    f_close (&fp);
+
+    out->version    = h.version;
+    out->compressed = (uint8_t)h.compressed;
+    out->hw_mode    = h.hw_mode;
+    out->is_48k     = (uint8_t)z80_is_48k (&h);
+    out->pc         = h.pc;
+    out->sp         = h.sp;
+    out->file_size  = 0u;
+    if (f_stat (path, &fi) == FR_OK) {
+        out->file_size = (uint32_t)fi.fsize;
+    }
+    return Z80L_OK;
+}
+
 int Z80_LoadAndRun (const char *path) {
     static FIL fp;
     static Z80OutState out;

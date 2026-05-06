@@ -798,6 +798,82 @@ static void ZX_WaitAnyKey (void) {
     }
 }
 
+static const char *ZX_Z80HwModeText (uint8_t version, uint8_t hw_mode) {
+    if (version <= 1u) { return "48K"; }
+    if (version == 2u) {
+        switch (hw_mode) {
+            case 0u: return "48K";
+            case 1u: return "48K+IF1";
+            case 2u: return "SAMRAM";
+            default: return "128K";
+        }
+    }
+    /* v3 */
+    switch (hw_mode) {
+        case 0u: return "48K";
+        case 1u: return "48K+IF1";
+        case 2u: return "48K+MGT";
+        case 3u: return "SAMRAM";
+        default: return "128K";
+    }
+}
+
+static int ZX_BrowserShowZ80Info (const char *path, const Z80FileInfo *info) {
+    uint8_t normal_attr = (uint8_t)((7u << 3) | 0u);
+    uint8_t title_attr  = (uint8_t)((1u << 3) | 7u);
+    uint8_t warn_attr   = (uint8_t)((6u << 3) | 0u);
+    char line[ZX_TERM_COLS + 1u];
+    const char *target;
+    uint8_t hw_attr;
+
+    target = ZX_Z80HwModeText (info->version, info->hw_mode);
+
+    ZX_TermModelClear();
+    ZX_TermModelWriteAt (0u, 0u, "RISKY SPECCY", normal_attr);
+    ZX_TermModelWriteAt (2u, 0u, "Z80 SNAPSHOT INFO", title_attr);
+
+    ZX_TermModelWriteAt (4u, 0u, (path != NULL) ? path : "(unknown)", normal_attr);
+
+    memset (line, ' ', sizeof (line));
+    line[ZX_TERM_COLS] = '\0';
+    (void)snprintf (line, sizeof (line), "VERSION: %u", (unsigned)info->version);
+    ZX_TermModelWriteAt (6u, 0u, line, normal_attr);
+
+    hw_attr = info->is_48k ? normal_attr : warn_attr;
+    memset (line, ' ', sizeof (line));
+    line[ZX_TERM_COLS] = '\0';
+    (void)snprintf (line, sizeof (line), "TARGET:  %s", target);
+    ZX_TermModelWriteAt (7u, 0u, line, hw_attr);
+
+    if (info->version == 1u) {
+        memset (line, ' ', sizeof (line));
+        line[ZX_TERM_COLS] = '\0';
+        (void)snprintf (line, sizeof (line), "BODY:    %s",
+                        info->compressed ? "COMPRESSED" : "UNCOMPRESSED");
+        ZX_TermModelWriteAt (8u, 0u, line, normal_attr);
+    }
+
+    memset (line, ' ', sizeof (line));
+    line[ZX_TERM_COLS] = '\0';
+    (void)snprintf (line, sizeof (line), "SIZE:    %lu BYTES", (unsigned long)info->file_size);
+    ZX_TermModelWriteAt (9u, 0u, line, normal_attr);
+
+    memset (line, ' ', sizeof (line));
+    line[ZX_TERM_COLS] = '\0';
+    (void)snprintf (line, sizeof (line), "PC:%04X  SP:%04X",
+                    (unsigned)info->pc, (unsigned)info->sp);
+    ZX_TermModelWriteAt (10u, 0u, line, normal_attr);
+
+    if (!info->is_48k) {
+        ZX_TermModelWriteAt (12u, 0u, "WARNING: NOT 48K!", warn_attr);
+        ZX_TermModelWriteAt (13u, 0u, "LOAD WILL FAIL", warn_attr);
+    }
+
+    ZX_TermModelWriteAt (22u, 0u, "ENTER LOAD  0 CANCEL", normal_attr);
+
+    return ZX_TermCommit();
+}
+
 static int ZX_BrowserShowLoadError (const char *path, int rc) {
     uint8_t normal_attr = (uint8_t)((7u << 3) | 0u);
     uint8_t alert_attr = (uint8_t)((2u << 3) | 7u);
@@ -1276,28 +1352,57 @@ void ZX_TerminalCommandZ80Select (const char *path) {
                 ZX_Z80Reset();
                 goto done;
             } else {
-                printf ("z80select: loading %s\r\n", full_path);
+                /* Show snapshot info page and wait for confirmation. */
                 {
-                    int load_rc = Z80_LoadAndRun (full_path);
-                    if (load_rc == Z80L_OK) {
-                        s_z80select_pending[0] = '\0';
-                        goto done;
+                    Z80FileInfo fi;
+                    int info_rc = Z80_GetFileInfo (full_path, &fi);
+                    if (info_rc == Z80L_OK) {
+                        int confirmed = 0;
+                        if (!ZX_BrowserShowZ80Info (full_path, &fi)) {
+                            printf ("WARN: z80select info draw timeout\r\n");
+                        }
+                        for (;;) {
+                            uint8_t ikey = 0u;
+                            int krc = ZX_KeyPoll (&ikey);
+                            if (krc < 0) { break; }
+                            if (krc > 0) {
+                                if (ikey == '\n') { confirmed = 1; }
+                                break;
+                            }
+                            Delay_Ms (20u);
+                        }
+                        if (!confirmed) {
+                            if (!ZX_BrowserRenderRetry (cur_path, selected)) {
+                                printf ("WARN: z80select redraw timeout\r\n");
+                            }
+                            suppress_enter_loops = 20u;
+                            continue;
+                        }
                     }
+                    /* Proceed with load (even if info read failed, attempt anyway). */
+                    printf ("z80select: loading %s\r\n", full_path);
+                    {
+                        int load_rc = Z80_LoadAndRun (full_path);
+                        if (load_rc == Z80L_OK) {
+                            s_z80select_pending[0] = '\0';
+                            goto done;
+                        }
 
-                    printf ("z80select: load failed (rc=%d)\r\n", load_rc);
-                    if (!ZX_BrowserShowLoadError (full_path, load_rc)) {
-                        printf ("WARN: z80select error screen draw timeout\r\n");
-                    }
-                    ZX_WaitAnyKey();
+                        printf ("z80select: load failed (rc=%d)\r\n", load_rc);
+                        if (!ZX_BrowserShowLoadError (full_path, load_rc)) {
+                            printf ("WARN: z80select error screen draw timeout\r\n");
+                        }
+                        ZX_WaitAnyKey();
 
-                    selected = 0u;
-                    if (!ZX_BrowserLoadFiles (cur_path)) {
-                        goto done;
+                        selected = 0u;
+                        if (!ZX_BrowserLoadFiles (cur_path)) {
+                            goto done;
+                        }
+                        if (!ZX_BrowserRenderRetry (cur_path, selected)) {
+                            printf ("WARN: z80select redraw timeout\r\n");
+                        }
+                        suppress_enter_loops = 20u;
                     }
-                    if (!ZX_BrowserRenderRetry (cur_path, selected)) {
-                        printf ("WARN: z80select redraw timeout\r\n");
-                    }
-                    suppress_enter_loops = 20u;
                 }
             }
             continue;
