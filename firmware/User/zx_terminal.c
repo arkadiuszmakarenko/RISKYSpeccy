@@ -10,29 +10,29 @@
 #include <stdio.h>
 #include <string.h>
 
-#define ZX_BRIDGE_SEQ_ADDR  0x3000u
-#define ZX_BRIDGE_LEN_ADDR  0x3001u
+#define ZX_BRIDGE_SEQ_ADDR 0x3000u
+#define ZX_BRIDGE_LEN_ADDR 0x3001u
 #define ZX_BRIDGE_TEXT_ADDR 0x3002u
-#define ZX_BRIDGE_MAX_TEXT  40u
-#define ZX_VIEW_SEQ_ADDR    0x302Au
-#define ZX_VIEW_ADDR_LO     0x302Bu
-#define ZX_VIEW_ADDR_HI     0x302Cu
-#define ZX_VIEW_LEN_ADDR    0x302Du
-#define ZX_VIEW_MAX_BYTES   16u
+#define ZX_BRIDGE_MAX_TEXT 40u
+#define ZX_VIEW_SEQ_ADDR 0x302Au
+#define ZX_VIEW_ADDR_LO 0x302Bu
+#define ZX_VIEW_ADDR_HI 0x302Cu
+#define ZX_VIEW_LEN_ADDR 0x302Du
+#define ZX_VIEW_MAX_BYTES 16u
 
 #define ZX_SCREEN_PIXELS_ADDR 0x4000u
-#define ZX_SCREEN_PIXELS_LEN  6144u
-#define ZX_SCREEN_ATTRS_ADDR  0x5800u
-#define ZX_SCREEN_ATTRS_LEN   768u
-#define ZX_TERM_COLS          32u
-#define ZX_TERM_ROWS          24u
-#define ZX_TERM_NMI_TO        220u
+#define ZX_SCREEN_PIXELS_LEN 6144u
+#define ZX_SCREEN_ATTRS_ADDR 0x5800u
+#define ZX_SCREEN_ATTRS_LEN 768u
+#define ZX_TERM_COLS 32u
+#define ZX_TERM_ROWS 24u
+#define ZX_TERM_NMI_TO 220u
 #define ZX_SCREEN_WRITE_CHUNK 64u
 
-#define ZX_BROWSER_MAX_FILES    64u
-#define ZX_BROWSER_NAME_MAX     160u
-#define ZX_BROWSER_PATH_MAX     196u
-#define ZX_BROWSER_PAGE_ROWS    18u
+#define ZX_BROWSER_MAX_FILES 64u
+#define ZX_BROWSER_NAME_MAX 160u
+#define ZX_BROWSER_PATH_MAX 196u
+#define ZX_BROWSER_PAGE_ROWS 18u
 #define ZX_BROWSER_SCAN_RETRIES 8u
 #define ZX_BROWSER_RENDER_RETRIES 20u
 
@@ -48,8 +48,8 @@ static uint8_t s_term_chars[ZX_TERM_ROWS][ZX_TERM_COLS];
 static uint8_t s_term_attrs[ZX_TERM_ROWS][ZX_TERM_COLS];
 static uint8_t s_term_row = 0u;
 static uint8_t s_term_col = 0u;
-static uint8_t s_term_fg = 0u;  /* black */
-static uint8_t s_term_bg = 7u;  /* white */
+static uint8_t s_term_fg = 0u;        /* black */
+static uint8_t s_term_bg = 7u;        /* white */
 static uint8_t s_term_bright = 0u;
 static uint8_t s_term_esc_state = 0u; /* 0=normal,1=ESC,2=CSI */
 static uint8_t s_term_csi_param[4];
@@ -71,51 +71,52 @@ static uint8_t s_browser_stack_depth = 0u;
 #define ZX_BROWSER_MODE_TAP 1u
 
 static const uint8_t s_font4x7_chars[] =
-    " 0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ-.:/_";
+    " 0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ\"-.:/_";
 
 static const uint8_t s_font4x7[][7] = {
-    {0x0u,0x0u,0x0u,0x0u,0x0u,0x0u,0x0u}, /* space */
-    {0x6u,0x9u,0x9u,0x9u,0x9u,0x9u,0x6u}, /* 0 */
-    {0x2u,0x6u,0x2u,0x2u,0x2u,0x2u,0x7u}, /* 1 */
-    {0x6u,0x9u,0x1u,0x2u,0x4u,0x8u,0xFu}, /* 2 */
-    {0xEu,0x1u,0x1u,0x6u,0x1u,0x1u,0xEu}, /* 3 */
-    {0x1u,0x3u,0x5u,0x9u,0xFu,0x1u,0x1u}, /* 4 */
-    {0xFu,0x8u,0x8u,0xEu,0x1u,0x1u,0xEu}, /* 5 */
-    {0x6u,0x8u,0x8u,0xEu,0x9u,0x9u,0x6u}, /* 6 */
-    {0xFu,0x1u,0x2u,0x2u,0x4u,0x4u,0x4u}, /* 7 */
-    {0x6u,0x9u,0x9u,0x6u,0x9u,0x9u,0x6u}, /* 8 */
-    {0x6u,0x9u,0x9u,0x7u,0x1u,0x1u,0x6u}, /* 9 */
-    {0x6u,0x9u,0x9u,0xFu,0x9u,0x9u,0x9u}, /* A */
-    {0xEu,0x9u,0x9u,0xEu,0x9u,0x9u,0xEu}, /* B */
-    {0x6u,0x9u,0x8u,0x8u,0x8u,0x9u,0x6u}, /* C */
-    {0xEu,0x9u,0x9u,0x9u,0x9u,0x9u,0xEu}, /* D */
-    {0xFu,0x8u,0x8u,0xEu,0x8u,0x8u,0xFu}, /* E */
-    {0xFu,0x8u,0x8u,0xEu,0x8u,0x8u,0x8u}, /* F */
-    {0x6u,0x9u,0x8u,0xBu,0x9u,0x9u,0x7u}, /* G */
-    {0x9u,0x9u,0x9u,0xFu,0x9u,0x9u,0x9u}, /* H */
-    {0x7u,0x2u,0x2u,0x2u,0x2u,0x2u,0x7u}, /* I */
-    {0x1u,0x1u,0x1u,0x1u,0x9u,0x9u,0x6u}, /* J */
-    {0x9u,0xAu,0xCu,0x8u,0xCu,0xAu,0x9u}, /* K */
-    {0x8u,0x8u,0x8u,0x8u,0x8u,0x8u,0xFu}, /* L */
-    {0x9u,0xFu,0xFu,0x9u,0x9u,0x9u,0x9u}, /* M */
-    {0x9u,0xDu,0xDu,0xBu,0xBu,0x9u,0x9u}, /* N */
-    {0x6u,0x9u,0x9u,0x9u,0x9u,0x9u,0x6u}, /* O */
-    {0xEu,0x9u,0x9u,0xEu,0x8u,0x8u,0x8u}, /* P */
-    {0x6u,0x9u,0x9u,0x9u,0xBu,0xAu,0x5u}, /* Q */
-    {0xEu,0x9u,0x9u,0xEu,0xCu,0xAu,0x9u}, /* R */
-    {0x7u,0x8u,0x8u,0x6u,0x1u,0x1u,0xEu}, /* S */
-    {0xFu,0x2u,0x2u,0x2u,0x2u,0x2u,0x2u}, /* T */
-    {0x9u,0x9u,0x9u,0x9u,0x9u,0x9u,0x6u}, /* U */
-    {0x9u,0x9u,0x9u,0x9u,0x9u,0x6u,0x6u}, /* V */
-    {0x9u,0x9u,0x9u,0x9u,0xFu,0xFu,0x9u}, /* W */
-    {0x9u,0x9u,0x6u,0x6u,0x6u,0x9u,0x9u}, /* X */
-    {0x9u,0x9u,0x6u,0x2u,0x2u,0x2u,0x2u}, /* Y */
-    {0xFu,0x1u,0x2u,0x4u,0x8u,0x8u,0xFu}, /* Z */
-    {0x0u,0x0u,0x0u,0xFu,0x0u,0x0u,0x0u}, /* - */
-    {0x0u,0x0u,0x0u,0x0u,0x0u,0x6u,0x6u}, /* . */
-    {0x0u,0x6u,0x6u,0x0u,0x6u,0x6u,0x0u}, /* : */
-    {0x1u,0x1u,0x2u,0x2u,0x4u,0x8u,0x8u}, /* / */
-    {0x0u,0x0u,0x0u,0x0u,0x0u,0x0u,0xFu}  /* _ */
+    {0x0u, 0x0u, 0x0u, 0x0u, 0x0u, 0x0u, 0x0u}, /* space */
+    {0x6u, 0x9u, 0x9u, 0x9u, 0x9u, 0x9u, 0x6u}, /* 0 */
+    {0x2u, 0x6u, 0x2u, 0x2u, 0x2u, 0x2u, 0x7u}, /* 1 */
+    {0x6u, 0x9u, 0x1u, 0x2u, 0x4u, 0x8u, 0xFu}, /* 2 */
+    {0xEu, 0x1u, 0x1u, 0x6u, 0x1u, 0x1u, 0xEu}, /* 3 */
+    {0x1u, 0x3u, 0x5u, 0x9u, 0xFu, 0x1u, 0x1u}, /* 4 */
+    {0xFu, 0x8u, 0x8u, 0xEu, 0x1u, 0x1u, 0xEu}, /* 5 */
+    {0x6u, 0x8u, 0x8u, 0xEu, 0x9u, 0x9u, 0x6u}, /* 6 */
+    {0xFu, 0x1u, 0x2u, 0x2u, 0x4u, 0x4u, 0x4u}, /* 7 */
+    {0x6u, 0x9u, 0x9u, 0x6u, 0x9u, 0x9u, 0x6u}, /* 8 */
+    {0x6u, 0x9u, 0x9u, 0x7u, 0x1u, 0x1u, 0x6u}, /* 9 */
+    {0x6u, 0x9u, 0x9u, 0xFu, 0x9u, 0x9u, 0x9u}, /* A */
+    {0xEu, 0x9u, 0x9u, 0xEu, 0x9u, 0x9u, 0xEu}, /* B */
+    {0x6u, 0x9u, 0x8u, 0x8u, 0x8u, 0x9u, 0x6u}, /* C */
+    {0xEu, 0x9u, 0x9u, 0x9u, 0x9u, 0x9u, 0xEu}, /* D */
+    {0xFu, 0x8u, 0x8u, 0xEu, 0x8u, 0x8u, 0xFu}, /* E */
+    {0xFu, 0x8u, 0x8u, 0xEu, 0x8u, 0x8u, 0x8u}, /* F */
+    {0x6u, 0x9u, 0x8u, 0xBu, 0x9u, 0x9u, 0x7u}, /* G */
+    {0x9u, 0x9u, 0x9u, 0xFu, 0x9u, 0x9u, 0x9u}, /* H */
+    {0x7u, 0x2u, 0x2u, 0x2u, 0x2u, 0x2u, 0x7u}, /* I */
+    {0x1u, 0x1u, 0x1u, 0x1u, 0x9u, 0x9u, 0x6u}, /* J */
+    {0x9u, 0xAu, 0xCu, 0x8u, 0xCu, 0xAu, 0x9u}, /* K */
+    {0x8u, 0x8u, 0x8u, 0x8u, 0x8u, 0x8u, 0xFu}, /* L */
+    {0x9u, 0xFu, 0xFu, 0x9u, 0x9u, 0x9u, 0x9u}, /* M */
+    {0x9u, 0xDu, 0xDu, 0xBu, 0xBu, 0x9u, 0x9u}, /* N */
+    {0x6u, 0x9u, 0x9u, 0x9u, 0x9u, 0x9u, 0x6u}, /* O */
+    {0xEu, 0x9u, 0x9u, 0xEu, 0x8u, 0x8u, 0x8u}, /* P */
+    {0x6u, 0x9u, 0x9u, 0x9u, 0xBu, 0xAu, 0x5u}, /* Q */
+    {0xEu, 0x9u, 0x9u, 0xEu, 0xCu, 0xAu, 0x9u}, /* R */
+    {0x7u, 0x8u, 0x8u, 0x6u, 0x1u, 0x1u, 0xEu}, /* S */
+    {0xFu, 0x2u, 0x2u, 0x2u, 0x2u, 0x2u, 0x2u}, /* T */
+    {0x9u, 0x9u, 0x9u, 0x9u, 0x9u, 0x9u, 0x6u}, /* U */
+    {0x9u, 0x9u, 0x9u, 0x9u, 0x9u, 0x6u, 0x6u}, /* V */
+    {0x9u, 0x9u, 0x9u, 0x9u, 0xFu, 0xFu, 0x9u}, /* W */
+    {0x9u, 0x9u, 0x6u, 0x6u, 0x6u, 0x9u, 0x9u}, /* X */
+    {0x9u, 0x9u, 0x6u, 0x2u, 0x2u, 0x2u, 0x2u}, /* Y */
+    {0xFu, 0x1u, 0x2u, 0x4u, 0x8u, 0x8u, 0xFu}, /* Z */
+    {0x5u, 0x5u, 0x0u, 0x0u, 0x0u, 0x0u, 0x0u}, /* " */
+    {0x0u, 0x0u, 0x0u, 0xFu, 0x0u, 0x0u, 0x0u}, /* - */
+    {0x0u, 0x0u, 0x0u, 0x0u, 0x0u, 0x6u, 0x6u}, /* . */
+    {0x0u, 0x6u, 0x6u, 0x0u, 0x6u, 0x6u, 0x0u}, /* : */
+    {0x1u, 0x1u, 0x2u, 0x2u, 0x4u, 0x8u, 0x8u}, /* / */
+    {0x0u, 0x0u, 0x0u, 0x0u, 0x0u, 0x0u, 0xFu}  /* _ */
 };
 
 static uint8_t ZX_Font4x7Row (uint8_t ch, uint8_t row) {
@@ -147,10 +148,18 @@ static uint16_t ZX_PixelAddr (uint8_t y, uint8_t x_byte) {
 static uint8_t ZX_Expand4To8 (uint8_t bits4) {
     uint8_t out = 0u;
 
-    if ((bits4 & 0x8u) != 0u) { out |= 0xC0u; }
-    if ((bits4 & 0x4u) != 0u) { out |= 0x30u; }
-    if ((bits4 & 0x2u) != 0u) { out |= 0x0Cu; }
-    if ((bits4 & 0x1u) != 0u) { out |= 0x03u; }
+    if ((bits4 & 0x8u) != 0u) {
+        out |= 0xC0u;
+    }
+    if ((bits4 & 0x4u) != 0u) {
+        out |= 0x30u;
+    }
+    if ((bits4 & 0x2u) != 0u) {
+        out |= 0x0Cu;
+    }
+    if ((bits4 & 0x1u) != 0u) {
+        out |= 0x03u;
+    }
     return out;
 }
 
@@ -467,8 +476,12 @@ static int ZX_TermHandleCsiFinal (uint8_t final_ch) {
     if (final_ch == 'H' || final_ch == 'f') {
         uint8_t row = ZX_TermCsiParam (0u, 1u);
         uint8_t col = ZX_TermCsiParam (1u, 1u);
-        if (row > ZX_TERM_ROWS) { row = ZX_TERM_ROWS; }
-        if (col > ZX_TERM_COLS) { col = ZX_TERM_COLS; }
+        if (row > ZX_TERM_ROWS) {
+            row = ZX_TERM_ROWS;
+        }
+        if (col > ZX_TERM_COLS) {
+            col = ZX_TERM_COLS;
+        }
         s_term_row = (uint8_t)(row - 1u);
         s_term_col = (uint8_t)(col - 1u);
         return 1;
@@ -587,12 +600,19 @@ static int ZX_ParseEscapedText (const char *in, uint8_t *out, uint16_t out_max, 
         uint8_t ch = (uint8_t)*in++;
         if ((ch == '\\') && (*in != '\0')) {
             char n = *in++;
-            if (n == 'n') { ch = '\n'; }
-            else if (n == 'r') { ch = '\r'; }
-            else if (n == 't') { ch = '\t'; }
-            else if (n == 'e') { ch = 0x1Bu; }
-            else if (n == '\\') { ch = '\\'; }
-            else { ch = (uint8_t)n; }
+            if (n == 'n') {
+                ch = '\n';
+            } else if (n == 'r') {
+                ch = '\r';
+            } else if (n == 't') {
+                ch = '\t';
+            } else if (n == 'e') {
+                ch = 0x1Bu;
+            } else if (n == '\\') {
+                ch = '\\';
+            } else {
+                ch = (uint8_t)n;
+            }
         }
 
         if (w >= out_max) {
@@ -674,10 +694,18 @@ static int ZX_BrowserLoadFiles (const char *path) {
         }
         while (1) {
             fr = f_readdir (&dir, &fno);
-            if ((fr != FR_OK) || (fno.fname[0] == '\0')) { break; }
-            if (fno.fname[0] == '.') { continue; }
-            if ((fno.fattrib & AM_DIR) == 0u) { continue; }
-            if (s_browser_count >= ZX_BROWSER_MAX_FILES) { break; }
+            if ((fr != FR_OK) || (fno.fname[0] == '\0')) {
+                break;
+            }
+            if (fno.fname[0] == '.') {
+                continue;
+            }
+            if ((fno.fattrib & AM_DIR) == 0u) {
+                continue;
+            }
+            if (s_browser_count >= ZX_BROWSER_MAX_FILES) {
+                break;
+            }
             strncpy (s_browser_files[s_browser_count],
                      (const char *)fno.fname,
                      (size_t)(ZX_BROWSER_NAME_MAX - 1u));
@@ -699,17 +727,27 @@ static int ZX_BrowserLoadFiles (const char *path) {
         }
         while (1) {
             fr = f_readdir (&dir, &fno);
-            if ((fr != FR_OK) || (fno.fname[0] == '\0')) { break; }
-            if ((fno.fattrib & AM_DIR) != 0u) { continue; }
+            if ((fr != FR_OK) || (fno.fname[0] == '\0')) {
+                break;
+            }
+            if ((fno.fattrib & AM_DIR) != 0u) {
+                continue;
+            }
             if (s_browser_mode == ZX_BROWSER_MODE_TAP) {
                 if (!ZX_HasTapExtension ((const char *)fno.fname) &&
-                    !ZX_HasTzxExtension ((const char *)fno.fname)) { continue; }
+                    !ZX_HasTzxExtension ((const char *)fno.fname)) {
+                    continue;
+                }
             } else {
                 if (!ZX_HasZ80Extension ((const char *)fno.fname) &&
                     !ZX_HasTapExtension ((const char *)fno.fname) &&
-                    !ZX_HasTzxExtension ((const char *)fno.fname)) { continue; }
+                    !ZX_HasTzxExtension ((const char *)fno.fname)) {
+                    continue;
+                }
             }
-            if (s_browser_count >= ZX_BROWSER_MAX_FILES) { break; }
+            if (s_browser_count >= ZX_BROWSER_MAX_FILES) {
+                break;
+            }
             strncpy (s_browser_files[s_browser_count],
                      (const char *)fno.fname,
                      (size_t)(ZX_BROWSER_NAME_MAX - 1u));
@@ -724,10 +762,10 @@ static int ZX_BrowserLoadFiles (const char *path) {
         Delay_Ms (80u);
     }
 
-    printf("%s: scan failed for '%s' (fr=%d)\r\n",
-           (s_browser_mode == ZX_BROWSER_MODE_TAP) ? "tapselect" : "z80select",
-           target,
-           (int)fr);
+    printf ("%s: scan failed for '%s' (fr=%d)\r\n",
+            (s_browser_mode == ZX_BROWSER_MODE_TAP) ? "tapselect" : "z80select",
+            target,
+            (int)fr);
     return 0;
 }
 
@@ -735,13 +773,13 @@ static int ZX_BrowserRender (const char *path, uint8_t selected);
 
 static const char *ZX_Z80LoadErrorText (int rc) {
     switch (rc) {
-        case Z80L_ERR_OPEN:    return "OPEN FAILED";
-        case Z80L_ERR_READ:    return "READ FAILED";
-        case Z80L_ERR_FORMAT:  return "BAD FORMAT";
-        case Z80L_ERR_VERSION: return "UNSUPPORTED VERSION";
-        case Z80L_ERR_LOAD:    return "LOAD FAILED";
-        case Z80L_ERR_LAUNCH:  return "LAUNCH FAILED";
-        default:               return "UNKNOWN ERROR";
+    case Z80L_ERR_OPEN: return "OPEN FAILED";
+    case Z80L_ERR_READ: return "READ FAILED";
+    case Z80L_ERR_FORMAT: return "BAD FORMAT";
+    case Z80L_ERR_VERSION: return "UNSUPPORTED VERSION";
+    case Z80L_ERR_LOAD: return "LOAD FAILED";
+    case Z80L_ERR_LAUNCH: return "LAUNCH FAILED";
+    default: return "UNKNOWN ERROR";
     }
 }
 
@@ -763,13 +801,15 @@ static void ZX_WaitAnyKey (void) {
 static int ZX_BrowserShowLoadError (const char *path, int rc) {
     uint8_t normal_attr = (uint8_t)((7u << 3) | 0u);
     uint8_t alert_attr = (uint8_t)((2u << 3) | 7u);
+    uint8_t red_attr = (uint8_t)((7u << 3) | 2u);
+
     char line[ZX_TERM_COLS + 1u];
     const char *msg = ZX_Z80LoadErrorText (rc);
 
     ZX_TermModelClear();
     ZX_TermModelWriteAt (0u, 0u, "RISKY SPECCY", normal_attr);
     ZX_TermModelWriteAt (2u, 0u, "Z80 LOAD ERROR", alert_attr);
-    ZX_TermModelWriteAt (4u, 0u, msg, normal_attr);
+    ZX_TermModelWriteAt (4u, 0u, msg, red_attr);
     ZX_TermModelWriteAt (6u, 0u, "FILE:", normal_attr);
     ZX_TermModelWriteAt (7u, 0u, (path != NULL) ? path : "(unknown)", normal_attr);
 
@@ -778,8 +818,7 @@ static int ZX_BrowserShowLoadError (const char *path, int rc) {
     (void)snprintf (line, sizeof (line), "RC=%d", rc);
     ZX_TermModelWriteAt (9u, 0u, line, normal_attr);
 
-    ZX_TermModelWriteAt (12u, 0u, "PRESS ANY KEY", normal_attr);
-    ZX_TermModelWriteAt (13u, 0u, "TO RESET MENU", normal_attr);
+    ZX_TermModelWriteAt (12u, 0u, "PRESS ANY KEY TO RESET MENU", red_attr);
 
     return ZX_TermCommit();
 }
@@ -787,17 +826,18 @@ static int ZX_BrowserShowLoadError (const char *path, int rc) {
 static int ZX_BrowserShowTapReady (const char *path) {
     uint8_t normal_attr = (uint8_t)((7u << 3) | 0u);
     uint8_t alert_attr = (uint8_t)((1u << 3) | 7u);
+    uint8_t red_attr = (uint8_t)((7u << 3) | 2u);
 
     ZX_TermModelClear();
     ZX_TermModelWriteAt (0u, 0u, "RISKY SPECCY", normal_attr);
-    ZX_TermModelWriteAt (2u, 0u, "TAP READY", alert_attr);
-    ZX_TermModelWriteAt (4u, 0u, "TYPE LOAD \"\"", normal_attr);
-    ZX_TermModelWriteAt (5u, 0u, "AND PRESS ENTER", normal_attr);
-    ZX_TermModelWriteAt (7u, 0u, "SHORT-PRESS PLAY/RESET BUTTON TO PLAY", normal_attr);
-    ZX_TermModelWriteAt (9u, 0u, "PRESS ANY KEY", normal_attr);
-    ZX_TermModelWriteAt (10u, 0u, "TO LOAD BASIC", normal_attr);
-    ZX_TermModelWriteAt (13u, 0u, "FILE:", normal_attr);
-    ZX_TermModelWriteAt (14u, 0u, (path != NULL) ? path : "(unknown)", normal_attr);
+    ZX_TermModelWriteAt (2u, 0u, "TAPE READY", alert_attr);
+    ZX_TermModelWriteAt (3u, 0u, "FILE:", normal_attr);
+    ZX_TermModelWriteAt (4u, 0u, (path != NULL) ? path : "(unknown)", normal_attr);
+    ZX_TermModelWriteAt (6u, 0u, "TYPE LOAD \"\" AND PRESS ENTER", normal_attr);
+    ZX_TermModelWriteAt (8u, 0u, "SHORT-PRESS PLAY/RESET BUTTON", normal_attr);
+    ZX_TermModelWriteAt (9u, 0u, "TO START PLAYBACK", normal_attr);
+    ZX_TermModelWriteAt (11u, 0u, "PRESS ANY KEY TO LOAD BASIC", red_attr);
+
 
     return ZX_TermCommit();
 }
@@ -922,18 +962,18 @@ void ZX_TerminalCommandViewOff (void) {
     uint8_t value = 0u;
 
     if (!ZX_CartRamWriteBlock (ZX_VIEW_LEN_ADDR, &value, 1u)) {
-        printf("ERR: zxview disable failed\r\n");
+        printf ("ERR: zxview disable failed\r\n");
         return;
     }
 
     ++s_view_seq;
     if (!ZX_CartRamWriteBlock (ZX_VIEW_SEQ_ADDR, &s_view_seq, 1u)) {
-        printf("ERR: zxview seq write failed\r\n");
+        printf ("ERR: zxview seq write failed\r\n");
         return;
     }
 
     ZX_TriggerNMI();
-    printf("ZX RAM viewer disabled\r\n");
+    printf ("ZX RAM viewer disabled\r\n");
 }
 
 void ZX_TerminalCommandView (uint16_t address, uint8_t length) {
@@ -944,21 +984,21 @@ void ZX_TerminalCommandView (uint16_t address, uint8_t length) {
     config[2] = length;
 
     if (!ZX_CartRamWriteBlock (ZX_VIEW_ADDR_LO, config, 3u)) {
-        printf("ERR: zxview config write failed\r\n");
+        printf ("ERR: zxview config write failed\r\n");
         return;
     }
 
     ++s_view_seq;
     if (!ZX_CartRamWriteBlock (ZX_VIEW_SEQ_ADDR, &s_view_seq, 1u)) {
-        printf("ERR: zxview seq write failed\r\n");
+        printf ("ERR: zxview seq write failed\r\n");
         return;
     }
 
     ZX_TriggerNMI();
-    printf("ZX RAM viewer set to 0x%04X (%u byte%s)\r\n",
-           (unsigned)address,
-           (unsigned)length,
-           (length == 1u) ? "" : "s");
+    printf ("ZX RAM viewer set to 0x%04X (%u byte%s)\r\n",
+            (unsigned)address,
+            (unsigned)length,
+            (length == 1u) ? "" : "s");
 }
 
 void ZX_TerminalCommandBridgeText (char *firstToken) {
@@ -967,7 +1007,7 @@ void ZX_TerminalCommandBridgeText (char *firstToken) {
     char *tok = firstToken;
 
     if (tok == NULL) {
-        printf("Usage: zxmsg <text>\r\n");
+        printf ("Usage: zxmsg <text>\r\n");
         return;
     }
 
@@ -983,21 +1023,21 @@ void ZX_TerminalCommandBridgeText (char *firstToken) {
     }
 
     if (!ZX_CartRamWriteBlock (ZX_BRIDGE_TEXT_ADDR, text, len)) {
-        printf("ERR: bridge text write failed\r\n");
+        printf ("ERR: bridge text write failed\r\n");
         return;
     }
 
     {
         uint8_t l = (uint8_t)len;
         if (!ZX_CartRamWriteBlock (ZX_BRIDGE_LEN_ADDR, &l, 1u)) {
-            printf("ERR: bridge len write failed\r\n");
+            printf ("ERR: bridge len write failed\r\n");
             return;
         }
     }
 
     ZX_TerminalMarkBridgeDirty();
     ZX_TriggerNMI();
-    printf("ZX message sent (%u chars)\r\n", (unsigned)len);
+    printf ("ZX message sent (%u chars)\r\n", (unsigned)len);
 }
 
 void ZX_TerminalCommandTermInit (void) {
@@ -1008,10 +1048,10 @@ void ZX_TerminalCommandTermInit (void) {
     ZX_TermCsiReset();
 
     if (!ZX_TermClear() || !ZX_TermCommit()) {
-        printf("ERR: terminal init draw failed\r\n");
+        printf ("ERR: terminal init draw failed\r\n");
         return;
     }
-    printf("ZX terminal ready (MPU-rendered 32x24, white bg/black text)\r\n");
+    printf ("ZX terminal ready (MPU-rendered 32x24, white bg/black text)\r\n");
 }
 
 void ZX_TerminalCommandTermWrite (char *firstToken) {
@@ -1022,7 +1062,7 @@ void ZX_TerminalCommandTermWrite (char *firstToken) {
     char *tok = firstToken;
 
     if (tok == NULL) {
-        printf("Usage: zxtty <text with \\n \\r \\t \\e escapes>\r\n");
+        printf ("Usage: zxtty <text with \\n \\r \\t \\e escapes>\r\n");
         return;
     }
 
@@ -1043,16 +1083,16 @@ void ZX_TerminalCommandTermWrite (char *firstToken) {
     }
 
     if (!ZX_ParseEscapedText (joined, buf, (uint16_t)sizeof (buf), &len)) {
-        printf("ERR: zxtty input too long\r\n");
+        printf ("ERR: zxtty input too long\r\n");
         return;
     }
 
     if (!ZX_TermWriteBuffer (buf, len)) {
-        printf("ERR: zxtty write failed\r\n");
+        printf ("ERR: zxtty write failed\r\n");
         return;
     }
     if (!ZX_TermCommit()) {
-        printf("ERR: zxtty flush failed\r\n");
+        printf ("ERR: zxtty flush failed\r\n");
         return;
     }
 }
@@ -1072,7 +1112,7 @@ void ZX_TerminalCommandZ80Select (const char *path) {
     cur_path[ZX_BROWSER_PATH_MAX - 1u] = '\0';
 
     if (!ZX_WaitNmiMailboxReady (3000u)) {
-        printf("ERR: z80select mailbox not ready\r\n");
+        printf ("ERR: z80select mailbox not ready\r\n");
         goto done;
     }
 
@@ -1085,18 +1125,18 @@ void ZX_TerminalCommandZ80Select (const char *path) {
         goto done;
     }
     if (!ZX_BrowserRenderRetry (cur_path, selected)) {
-        printf("ERR: z80select draw failed\r\n");
+        printf ("ERR: z80select draw failed\r\n");
         goto done;
     }
 
-    printf("z80select: Q/A move, O/P page, ENTER load/open, 0 back\r\n");
+    printf ("z80select: Q/A move, O/P page, ENTER load/open, 0 back\r\n");
 
     for (;;) {
         uint8_t key = 0u;
         int rc = ZX_KeyPoll (&key);
 
         if (rc < 0) {
-            printf("ERR: key mailbox read failed\r\n");
+            printf ("ERR: key mailbox read failed\r\n");
             goto done;
         }
         if (rc == 0) {
@@ -1111,7 +1151,7 @@ void ZX_TerminalCommandZ80Select (const char *path) {
             if (selected > 0u) {
                 --selected;
                 if (!ZX_BrowserRenderRetry (cur_path, selected)) {
-                    printf("WARN: z80select redraw timeout\r\n");
+                    printf ("WARN: z80select redraw timeout\r\n");
                 }
             }
             suppress_enter_loops = 0u;
@@ -1121,7 +1161,7 @@ void ZX_TerminalCommandZ80Select (const char *path) {
             if ((uint16_t)selected + 1u < s_browser_count) {
                 ++selected;
                 if (!ZX_BrowserRenderRetry (cur_path, selected)) {
-                    printf("WARN: z80select redraw timeout\r\n");
+                    printf ("WARN: z80select redraw timeout\r\n");
                 }
             }
             suppress_enter_loops = 0u;
@@ -1134,7 +1174,7 @@ void ZX_TerminalCommandZ80Select (const char *path) {
                 selected = 0u;
             }
             if (!ZX_BrowserRenderRetry (cur_path, selected)) {
-                printf("WARN: z80select redraw timeout\r\n");
+                printf ("WARN: z80select redraw timeout\r\n");
             }
             suppress_enter_loops = 20u;
             continue;
@@ -1146,7 +1186,7 @@ void ZX_TerminalCommandZ80Select (const char *path) {
             }
             selected = (uint8_t)next;
             if (!ZX_BrowserRenderRetry (cur_path, selected)) {
-                printf("WARN: z80select redraw timeout\r\n");
+                printf ("WARN: z80select redraw timeout\r\n");
             }
             suppress_enter_loops = 20u;
             continue;
@@ -1163,7 +1203,7 @@ void ZX_TerminalCommandZ80Select (const char *path) {
                     goto done;
                 }
                 if (!ZX_BrowserRenderRetry (cur_path, selected)) {
-                    printf("WARN: z80select redraw timeout\r\n");
+                    printf ("WARN: z80select redraw timeout\r\n");
                 }
             }
             suppress_enter_loops = 0u;
@@ -1179,7 +1219,7 @@ void ZX_TerminalCommandZ80Select (const char *path) {
                     char new_path[ZX_BROWSER_PATH_MAX];
                     if (!ZX_BrowserBuildPath (new_path, sizeof (new_path),
                                               cur_path, s_browser_files[selected])) {
-                        printf("z80select: path too long\r\n");
+                        printf ("z80select: path too long\r\n");
                         continue;
                     }
                     strncpy (s_browser_path_stack[s_browser_stack_depth],
@@ -1195,23 +1235,23 @@ void ZX_TerminalCommandZ80Select (const char *path) {
                         goto done;
                     }
                     if (!ZX_BrowserRenderRetry (cur_path, selected)) {
-                        printf("WARN: z80select redraw timeout\r\n");
+                        printf ("WARN: z80select redraw timeout\r\n");
                     }
                 } else {
-                    printf("z80select: max folder depth reached\r\n");
+                    printf ("z80select: max folder depth reached\r\n");
                 }
                 suppress_enter_loops = 20u;
                 continue;
             }
             if (!ZX_BrowserBuildPath (full_path, sizeof (full_path), cur_path, s_browser_files[selected])) {
-                printf("z80select: path too long, cannot open\r\n");
+                printf ("z80select: path too long, cannot open\r\n");
                 continue;
             }
             if (ZX_HasTapExtension (s_browser_files[selected]) ||
                 ZX_HasTzxExtension (s_browser_files[selected])) {
                 TAP_Player_Stop();
                 if (!TAP_Player_Load (full_path)) {
-                    printf("z80select: tap prepare failed for %s\r\n", full_path);
+                    printf ("z80select: tap prepare failed for %s\r\n", full_path);
                     suppress_enter_loops = 20u;
                     continue;
                 }
@@ -1220,11 +1260,11 @@ void ZX_TerminalCommandZ80Select (const char *path) {
                 s_tapselect_pending[ZX_BROWSER_PATH_MAX - 1u] = '\0';
 
                 if (!ZX_BrowserShowTapReady (full_path)) {
-                    printf("WARN: z80select tap-ready draw timeout\r\n");
+                    printf ("WARN: z80select tap-ready draw timeout\r\n");
                 }
-                printf("z80select: queued tap %s\r\n", full_path);
-                printf("z80select: type LOAD \"\" and press Enter on the Spectrum, then short-press Play/Reset button to start playback\r\n");
-                printf("z80select: press any Spectrum key now to return to BASIC\r\n");
+                printf ("z80select: queued tap %s\r\n", full_path);
+                printf ("z80select: type LOAD \"\" and press Enter on the Spectrum, then short-press Play/Reset button to start playback\r\n");
+                printf ("z80select: press any Spectrum key now to return to BASIC\r\n");
                 ZX_WaitAnyKey();
                 s_selector_font_mode = 0u;
                 if (draw_suspended) {
@@ -1236,7 +1276,7 @@ void ZX_TerminalCommandZ80Select (const char *path) {
                 ZX_Z80Reset();
                 goto done;
             } else {
-                printf("z80select: loading %s\r\n", full_path);
+                printf ("z80select: loading %s\r\n", full_path);
                 {
                     int load_rc = Z80_LoadAndRun (full_path);
                     if (load_rc == Z80L_OK) {
@@ -1244,9 +1284,9 @@ void ZX_TerminalCommandZ80Select (const char *path) {
                         goto done;
                     }
 
-                    printf("z80select: load failed (rc=%d)\r\n", load_rc);
+                    printf ("z80select: load failed (rc=%d)\r\n", load_rc);
                     if (!ZX_BrowserShowLoadError (full_path, load_rc)) {
-                        printf("WARN: z80select error screen draw timeout\r\n");
+                        printf ("WARN: z80select error screen draw timeout\r\n");
                     }
                     ZX_WaitAnyKey();
 
@@ -1255,7 +1295,7 @@ void ZX_TerminalCommandZ80Select (const char *path) {
                         goto done;
                     }
                     if (!ZX_BrowserRenderRetry (cur_path, selected)) {
-                        printf("WARN: z80select redraw timeout\r\n");
+                        printf ("WARN: z80select redraw timeout\r\n");
                     }
                     suppress_enter_loops = 20u;
                 }
@@ -1288,7 +1328,7 @@ void ZX_TerminalCommandTapSelect (const char *path) {
     cur_path[ZX_BROWSER_PATH_MAX - 1u] = '\0';
 
     if (!ZX_WaitNmiMailboxReady (3000u)) {
-        printf("ERR: tapselect mailbox not ready\r\n");
+        printf ("ERR: tapselect mailbox not ready\r\n");
         goto done;
     }
 
@@ -1301,18 +1341,18 @@ void ZX_TerminalCommandTapSelect (const char *path) {
         goto done;
     }
     if (!ZX_BrowserRenderRetry (cur_path, selected)) {
-        printf("ERR: tapselect draw failed\r\n");
+        printf ("ERR: tapselect draw failed\r\n");
         goto done;
     }
 
-    printf("tapselect: Q/A move, O/P page, ENTER queue/open, 0 back\r\n");
+    printf ("tapselect: Q/A move, O/P page, ENTER queue/open, 0 back\r\n");
 
     for (;;) {
         uint8_t key = 0u;
         int rc = ZX_KeyPoll (&key);
 
         if (rc < 0) {
-            printf("ERR: key mailbox read failed\r\n");
+            printf ("ERR: key mailbox read failed\r\n");
             goto done;
         }
         if (rc == 0) {
@@ -1327,7 +1367,7 @@ void ZX_TerminalCommandTapSelect (const char *path) {
             if (selected > 0u) {
                 --selected;
                 if (!ZX_BrowserRenderRetry (cur_path, selected)) {
-                    printf("WARN: tapselect redraw timeout\r\n");
+                    printf ("WARN: tapselect redraw timeout\r\n");
                 }
             }
             suppress_enter_loops = 0u;
@@ -1337,7 +1377,7 @@ void ZX_TerminalCommandTapSelect (const char *path) {
             if ((uint16_t)selected + 1u < s_browser_count) {
                 ++selected;
                 if (!ZX_BrowserRenderRetry (cur_path, selected)) {
-                    printf("WARN: tapselect redraw timeout\r\n");
+                    printf ("WARN: tapselect redraw timeout\r\n");
                 }
             }
             suppress_enter_loops = 0u;
@@ -1350,7 +1390,7 @@ void ZX_TerminalCommandTapSelect (const char *path) {
                 selected = 0u;
             }
             if (!ZX_BrowserRenderRetry (cur_path, selected)) {
-                printf("WARN: tapselect redraw timeout\r\n");
+                printf ("WARN: tapselect redraw timeout\r\n");
             }
             suppress_enter_loops = 20u;
             continue;
@@ -1362,7 +1402,7 @@ void ZX_TerminalCommandTapSelect (const char *path) {
             }
             selected = (uint8_t)next;
             if (!ZX_BrowserRenderRetry (cur_path, selected)) {
-                printf("WARN: tapselect redraw timeout\r\n");
+                printf ("WARN: tapselect redraw timeout\r\n");
             }
             suppress_enter_loops = 20u;
             continue;
@@ -1379,7 +1419,7 @@ void ZX_TerminalCommandTapSelect (const char *path) {
                     goto done;
                 }
                 if (!ZX_BrowserRenderRetry (cur_path, selected)) {
-                    printf("WARN: tapselect redraw timeout\r\n");
+                    printf ("WARN: tapselect redraw timeout\r\n");
                 }
             }
             suppress_enter_loops = 0u;
@@ -1396,7 +1436,7 @@ void ZX_TerminalCommandTapSelect (const char *path) {
                 char new_path[ZX_BROWSER_PATH_MAX];
                 if (!ZX_BrowserBuildPath (new_path, sizeof (new_path),
                                           cur_path, s_browser_files[selected])) {
-                    printf("tapselect: path too long\r\n");
+                    printf ("tapselect: path too long\r\n");
                     continue;
                 }
                 strncpy (s_browser_path_stack[s_browser_stack_depth],
@@ -1412,22 +1452,22 @@ void ZX_TerminalCommandTapSelect (const char *path) {
                     goto done;
                 }
                 if (!ZX_BrowserRenderRetry (cur_path, selected)) {
-                    printf("WARN: tapselect redraw timeout\r\n");
+                    printf ("WARN: tapselect redraw timeout\r\n");
                 }
             } else {
-                printf("tapselect: max folder depth reached\r\n");
+                printf ("tapselect: max folder depth reached\r\n");
             }
             suppress_enter_loops = 20u;
             continue;
         }
         if (!ZX_BrowserBuildPath (full_path, sizeof (full_path), cur_path, s_browser_files[selected])) {
-            printf("tapselect: path too long, cannot queue\r\n");
+            printf ("tapselect: path too long, cannot queue\r\n");
             continue;
         }
 
         TAP_Player_Stop();
         if (!TAP_Player_Load (full_path)) {
-            printf("tapselect: prepare failed for %s\r\n", full_path);
+            printf ("tapselect: prepare failed for %s\r\n", full_path);
             suppress_enter_loops = 20u;
             continue;
         }
@@ -1436,11 +1476,11 @@ void ZX_TerminalCommandTapSelect (const char *path) {
         s_tapselect_pending[ZX_BROWSER_PATH_MAX - 1u] = '\0';
 
         if (!ZX_BrowserShowTapReady (full_path)) {
-            printf("WARN: tapselect ready screen draw timeout\r\n");
+            printf ("WARN: tapselect ready screen draw timeout\r\n");
         }
-        printf("tapselect: queued %s\r\n", full_path);
-        printf("tapselect: type LOAD \"\" and press Enter on the Spectrum, then short-press BUTTON to start playback\r\n");
-        printf("tapselect: press any Spectrum key now to return to BASIC\r\n");
+        printf ("tapselect: queued %s\r\n", full_path);
+        printf ("tapselect: type LOAD \"\" and press Enter on the Spectrum, then short-press BUTTON to start playback\r\n");
+        printf ("tapselect: press any Spectrum key now to return to BASIC\r\n");
         ZX_WaitAnyKey();
         go_to_basic = 1;
         goto done;
@@ -1473,5 +1513,3 @@ const char *ZX_TerminalPendingTapSelection (void) {
 void ZX_TerminalClearPendingTapSelection (void) {
     s_tapselect_pending[0] = '\0';
 }
-
-

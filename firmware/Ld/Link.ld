@@ -47,16 +47,6 @@ SECTIONS
 	  . = ALIGN(64);
   } >FLASH AT>FLASH
 
-	.fasttext :
-	{
-		. = ALIGN(64);
-		/* Keep the entire zx_bus module in early flash for timing stability. */
-		*zx_bus.o(.text .text.* .rodata .rodata.* .gnu.linkonce.t.*)
-		KEEP(*(.text.fastirq))
-		KEEP(*(.text.fastirq.*))
-		. = ALIGN(4);
-	} >FLASH AT>FLASH
-
 	.text :
 	{
 		. = ALIGN(4);
