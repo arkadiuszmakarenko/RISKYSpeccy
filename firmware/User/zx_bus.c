@@ -163,9 +163,9 @@ static int ZX_NmiWriteBlockInternal (uint16_t address, const uint8_t *buffer, ui
             if (done == seq) {
                 break;
             }
-            Delay_Ms (1u);
-            ++waited;
-        } while (waited < timeout_ms);
+            Delay_Us (500u);
+            waited += 1u;
+        } while (waited < timeout_ms * 2u);
 
         if (done != seq) {
             return 0;

@@ -27,7 +27,8 @@
 #define ZX_TERM_COLS 32u
 #define ZX_TERM_ROWS 24u
 #define ZX_TERM_NMI_TO 220u
-#define ZX_SCREEN_WRITE_CHUNK 64u
+#define ZX_SCREEN_WRITE_CHUNK 512u
+#define ZX_SCREEN_DIFF_MERGE_GAP 16u
 
 #define ZX_BROWSER_MAX_FILES 64u
 #define ZX_BROWSER_NAME_MAX 160u
@@ -206,7 +207,6 @@ static int ZX_BusWriteChunked (uint16_t base_addr, const uint8_t *buffer, uint16
         if (chunk > ZX_SCREEN_WRITE_CHUNK) {
             chunk = ZX_SCREEN_WRITE_CHUNK;
         }
-        /* Keep chunk size modest to avoid long mailbox service latency. */
         if (!ZX_BusWriteBlock ((uint16_t)(base_addr + offset), &buffer[offset], chunk)) {
             return 0;
         }
@@ -224,8 +224,10 @@ static int ZX_BusWriteDiff (uint16_t base_addr,
 
     while (i < length) {
         uint16_t start;
-        uint16_t run;
+        uint16_t end;
+        uint16_t gap;
 
+        /* skip leading unchanged bytes */
         while ((i < length) && (current[i] == previous[i])) {
             ++i;
         }
@@ -234,15 +236,32 @@ static int ZX_BusWriteDiff (uint16_t base_addr,
         }
 
         start = i;
-        while ((i < length) && (current[i] != previous[i])) {
-            ++i;
-        }
-        run = (uint16_t)(i - start);
+        end   = i;
 
-        if (!ZX_BusWriteChunked ((uint16_t)(base_addr + start), &current[start], run)) {
+        /* extend the run forward, merging across small unchanged gaps */
+        while (end < length) {
+            if (current[end] != previous[end]) {
+                ++end;
+            } else {
+                /* measure the gap of unchanged bytes */
+                gap = 0u;
+                while (((end + gap) < length) &&
+                       (current[end + gap] == previous[end + gap]) &&
+                       (gap < ZX_SCREEN_DIFF_MERGE_GAP)) {
+                    ++gap;
+                }
+                if (gap >= ZX_SCREEN_DIFF_MERGE_GAP) {
+                    break; /* gap too wide — stop the run here */
+                }
+                end = (uint16_t)(end + gap);
+            }
+        }
+
+        if (!ZX_BusWriteChunked ((uint16_t)(base_addr + start), &current[start], (uint16_t)(end - start))) {
             return 0;
         }
-        memcpy (&previous[start], &current[start], run);
+        memcpy (&previous[start], &current[start], (size_t)(end - start));
+        i = end;
     }
 
     return 1;

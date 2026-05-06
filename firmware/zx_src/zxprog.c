@@ -102,12 +102,33 @@ static volatile unsigned char kbd_prev7;
 
 /* Startup, NMI wrapper are in crt0.s */
 
-/* ---- byte-copy helper (avoids stdlib dependency) ---- */
-static void zcopy(unsigned char *dst, const unsigned char *src, unsigned int len)
+/* ---- byte-copy helper: uses LDIR for ~8x speed vs SDCC-generated loop ----
+ * SDCC Z80 calling convention (3 args):
+ *   dst (16-bit ptr) -> HL, src (16-bit ptr) -> DE, len (16-bit) -> stack.
+ * After push IX: SP+4 = len_lo, SP+5 = len_hi.
+ * LDIR needs: HL=source, DE=dest, BC=count — so we swap HL/DE.
+ * Epilogue mirrors original SDCC pattern: pop hl (ret addr), pop af (len cleanup),
+ * jp (hl) — the 3rd arg must be consumed here, not by the caller. */
+static void zcopy(unsigned char *dst, const unsigned char *src, unsigned int len) __naked
 {
-    while (len--) {
-        *dst++ = *src++;
-    }
+    (void)dst; (void)src; (void)len;
+__asm
+    push    ix
+    ld      ix, #0
+    add     ix, sp
+    ld      c, 4 (ix)
+    ld      b, 5 (ix)
+    ex      de, hl
+    ld      a, b
+    or      a, c
+    jr      z, 00001$
+    ldir
+00001$:
+    pop     ix
+    pop     hl
+    pop     af
+    jp      (hl)
+__endasm;
 }
 
 /* ---- byte-fill helper ---- */
