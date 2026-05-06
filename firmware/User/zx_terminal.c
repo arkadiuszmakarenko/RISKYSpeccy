@@ -805,7 +805,9 @@ static const char *ZX_Z80HwModeText (uint8_t version, uint8_t hw_mode) {
             case 0u: return "48K";
             case 1u: return "48K+IF1";
             case 2u: return "SAMRAM";
-            default: return "128K";
+            case 3u: return "128K";
+            case 4u: return "128K+IF1";
+            default: return "UNKNOWN";
         }
     }
     /* v3 */
@@ -814,7 +816,11 @@ static const char *ZX_Z80HwModeText (uint8_t version, uint8_t hw_mode) {
         case 1u: return "48K+IF1";
         case 2u: return "48K+MGT";
         case 3u: return "SAMRAM";
-        default: return "128K";
+        case 4u: return "128K";
+        case 5u: return "128K+IF1";
+        case 6u: return "+3";
+        case 7u: return "+2A";
+        default: return "UNKNOWN";
     }
 }
 
@@ -839,7 +845,7 @@ static int ZX_BrowserShowZ80Info (const char *path, const Z80FileInfo *info) {
     (void)snprintf (line, sizeof (line), "VERSION: %u", (unsigned)info->version);
     ZX_TermModelWriteAt (6u, 0u, line, normal_attr);
 
-    hw_attr = info->is_48k ? normal_attr : warn_attr;
+    hw_attr = (info->is_48k || info->is_128k) ? normal_attr : warn_attr;
     memset (line, ' ', sizeof (line));
     line[ZX_TERM_COLS] = '\0';
     (void)snprintf (line, sizeof (line), "TARGET:  %s", target);
@@ -850,6 +856,11 @@ static int ZX_BrowserShowZ80Info (const char *path, const Z80FileInfo *info) {
         line[ZX_TERM_COLS] = '\0';
         (void)snprintf (line, sizeof (line), "BODY:    %s",
                         info->compressed ? "COMPRESSED" : "UNCOMPRESSED");
+        ZX_TermModelWriteAt (8u, 0u, line, normal_attr);
+    } else if (info->is_128k) {
+        memset (line, ' ', sizeof (line));
+        line[ZX_TERM_COLS] = '\0';
+        (void)snprintf (line, sizeof (line), "7FFD:    %02X", (unsigned)info->page_7ffd);
         ZX_TermModelWriteAt (8u, 0u, line, normal_attr);
     }
 
@@ -864,8 +875,8 @@ static int ZX_BrowserShowZ80Info (const char *path, const Z80FileInfo *info) {
                     (unsigned)info->pc, (unsigned)info->sp);
     ZX_TermModelWriteAt (10u, 0u, line, normal_attr);
 
-    if (!info->is_48k) {
-        ZX_TermModelWriteAt (12u, 0u, "WARNING: NOT 48K!", warn_attr);
+    if (!info->is_48k && !info->is_128k) {
+        ZX_TermModelWriteAt (12u, 0u, "WARNING: NOT SUPPORTED!", warn_attr);
         ZX_TermModelWriteAt (13u, 0u, "LOAD WILL FAIL", warn_attr);
     }
 

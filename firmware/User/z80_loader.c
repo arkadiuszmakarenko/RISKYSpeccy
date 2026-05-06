@@ -39,6 +39,7 @@ typedef struct {
     uint8_t  im;
     uint8_t  version;         /* 1, 2, or 3 */
     uint8_t  hw_mode;         /* v2/v3 extended header byte 2 */
+    uint8_t  page_7ffd;       /* last OUT to 0x7FFD (v2/v3 128K only, else 0) */
 } Z80Header;
 
 static void z80_parse_base_header (const uint8_t *h, Z80Header *out) {
@@ -65,8 +66,9 @@ static void z80_parse_base_header (const uint8_t *h, Z80Header *out) {
     out->compressed = (out->flags1 & 0x20u) ? 1 : 0;
     out->border  = (uint8_t)((out->flags1 >> 1) & 0x07u);
     out->im      = (uint8_t)(out->flags2 & 0x03u);
-    out->version = (out->pc != 0u) ? 1u : 0u;  /* 0 = need ext header */
-    out->hw_mode = 0u;
+    out->version  = (out->pc != 0u) ? 1u : 0u;  /* 0 = need ext header */
+    out->hw_mode  = 0u;
+    out->page_7ffd = 0u;
 }
 
 /*
@@ -98,12 +100,16 @@ static int z80_read_ext_header (FIL *fp, Z80Header *h) {
 
     h->pc      = (uint16_t)ext[0] | ((uint16_t)ext[1] << 8);
     h->hw_mode = ext[2];
+    /* ext[3] holds the last byte written to port 0x7FFD on 128K machines.
+     * v2 mode 3/4 = 128K/+2; v3 mode 4/5 = 128K/+2. */
+    h->page_7ffd = ext[3];
     return 1;
 }
 
 /*
- * v2 hardware mode: 0=48K, 1=48K+IF1, 2=SamRam, 3+=128K
- * v3 hardware mode: 0=48K, 1=48K+IF1, 2=48K+MGT, 3=SamRam, 4+=128K
+ * v2 hardware mode: 0=48K, 1=48K+IF1, 2=SamRam, 3=128K, 4=128K+IF1
+ * v3 hardware mode: 0=48K, 1=48K+IF1, 2=48K+MGT, 3=SamRam, 4=128K, 5=128K+IF1,
+ *                   6=+3, 7=+2A
  * Accept only modes that map to plain 48K RAM layout.
  */
 static int z80_is_48k (const Z80Header *h) {
@@ -111,6 +117,21 @@ static int z80_is_48k (const Z80Header *h) {
     if (h->version == 2u) { return (h->hw_mode <= 1u); }
     if (h->version == 3u) { return (h->hw_mode <= 2u); }
     return 0;
+}
+
+/*
+ * Returns 1 for 128K/+2 hardware modes (port 0x7FFD paging, 8 RAM pages).
+ * v2 modes 3,4; v3 modes 4,5. +3/+2A (v3 modes 6,7) use different paging.
+ */
+static int z80_is_128k (const Z80Header *h) {
+    if (h->version == 2u) { return (h->hw_mode == 3u || h->hw_mode == 4u) ? 1 : 0; }
+    if (h->version == 3u) { return (h->hw_mode == 4u || h->hw_mode == 5u) ? 1 : 0; }
+    return 0;
+}
+
+/* Returns 1 if the snapshot hardware is supported (48K or 128K/+2). */
+static int z80_is_supported (const Z80Header *h) {
+    return z80_is_48k (h) || z80_is_128k (h);
 }
 
 
@@ -247,10 +268,35 @@ static int z80_stream_body (Z80Reader *r, Z80OutState *o, int compressed) {
 static uint16_t z80_page_to_addr (uint8_t page) {
     switch (page) {
         case 4u: return 0x8000u;   /* RAM page 2 */
-        case 5u: return 0xC000u;   /* RAM page 5 (top) */
-        case 8u: return 0x4000u;   /* RAM page 5 in 48K = screen RAM */
+        case 5u: return 0xC000u;   /* RAM page 0 (top in 48K) */
+        case 8u: return 0x4000u;   /* RAM page 5 = screen RAM */
         default: return 0x0000u;   /* ROM or unsupported page */
     }
+}
+
+/*
+ * Map .z80 page number for 128K snapshots to physical ZX address.
+ * Pages 3-10 = RAM pages 0-7.
+ * Pages 5→0x8000 and 8→0x4000 are always mapped (fixed).
+ * All others (RAM pages 0,1,3,4,6,7) go to 0xC000 and need bank switching.
+ * Returns 0x0000 for ROM/unknown pages (skip).
+ */
+static uint16_t z80_page_to_addr_128k (uint8_t page) {
+    if (page == 8u) { return 0x4000u; }  /* RAM page 5: screen, always mapped */
+    if (page == 5u) { return 0x8000u; }  /* RAM page 2: always mapped */
+    if ((page >= 3u) && (page <= 10u)) { return 0xC000u; } /* banked at 0xC000 */
+    return 0x0000u;  /* ROM or unknown: skip */
+}
+
+/*
+ * For 128K banked pages (those that go to 0xC000): return the RAM page
+ * number (0-7) to bank in via port 0x7FFD.  Returns 0xFF for fixed-address
+ * pages (4000/8000) that need no bank switching.
+ */
+static uint8_t z80_page_to_rampage (uint8_t page) {
+    if ((page == 8u) || (page == 5u)) { return 0xFFu; }  /* fixed address */
+    if ((page >= 3u) && (page <= 10u)) { return (uint8_t)(page - 3u); }
+    return 0xFFu;
 }
 
 /*
@@ -317,14 +363,18 @@ static int z80_skip_bytes (Z80Reader *r, uint16_t byte_count) {
 
 /*
  * Process all paged blocks from a v2/v3 body.
- * Reads block headers (len_lo, len_hi, page) until EOF and dispatches
- * known 48K pages (4, 5, 8) to ZX RAM; unknown pages are skipped.
- * Returns 1 if all three 48K pages were loaded successfully.
+ * is_128k: 0 = 48K mode (expect pages 4,5,8); 1 = 128K mode (pages 3-10).
+ * For 128K banked pages the caller must have set up the PGCMD mechanism so
+ * ZX_128kPage() can bank in the correct RAM page at 0xC000 before writing.
+ * Returns 1 if all expected pages were loaded successfully.
  */
-static int z80_stream_v2v3_body (Z80Reader *r, Z80OutState *o) {
-    uint8_t got_page4 = 0u;
-    uint8_t got_page5 = 0u;
-    uint8_t got_page8 = 0u;
+static int z80_stream_v2v3_body (Z80Reader *r, Z80OutState *o, int is_128k) {
+    /* Track which RAM pages have arrived (bit N = RAM page N). */
+    uint8_t got_mask   = 0u;
+    uint8_t need_mask  = is_128k ? 0xFFu : 0x00u;  /* 128K: all 8; 48K: pages 4/5/8 */
+    uint8_t got_page4  = 0u;  /* 48K page-4 (0x8000) */
+    uint8_t got_page5  = 0u;  /* 48K page-5 (0xC000) */
+    uint8_t got_page8  = 0u;  /* 48K page-8 (0x4000) */
 
     for (;;) {
         uint8_t  h0, h1, h2;
@@ -345,7 +395,12 @@ static int z80_stream_v2v3_body (Z80Reader *r, Z80OutState *o) {
 
         block_len = (uint16_t)h0 | ((uint16_t)h1 << 8);
         page      = h2;
-        zx_addr   = z80_page_to_addr (page);
+
+        if (is_128k) {
+            zx_addr = z80_page_to_addr_128k (page);
+        } else {
+            zx_addr = z80_page_to_addr (page);
+        }
 
         if (zx_addr == 0x0000u) {
             /* ROM or unknown page: skip its bytes */
@@ -356,6 +411,19 @@ static int z80_stream_v2v3_body (Z80Reader *r, Z80OutState *o) {
             continue;
         }
 
+        /* For 128K banked pages destined for 0xC000: bank in the correct page. */
+        if (is_128k && (zx_addr == 0xC000u)) {
+            uint8_t ram_page = z80_page_to_rampage (page);
+            /* Write only bits 0-2 (RAM bank) and bit 4 (ROM1); keep rest clear. */
+            uint8_t pval = (uint8_t)((ram_page & 0x07u) | 0x10u);
+            printf ("z80: banking RAM page %u (7FFD=%02X)\r\n",
+                    (unsigned)ram_page, (unsigned)pval);
+            if (!ZX_128kPage (pval)) {
+                printf ("z80: bank switch failed for page %u\r\n", (unsigned)page);
+                return 0;
+            }
+        }
+
         o->base = zx_addr;
         if (!z80_stream_block (r, o, block_len)) {
             printf ("z80: block load failed (page %u → 0x%04X)\r\n",
@@ -364,15 +432,29 @@ static int z80_stream_v2v3_body (Z80Reader *r, Z80OutState *o) {
         }
         printf ("z80: page %u → 0x%04X\r\n", (unsigned)page, (unsigned)zx_addr);
 
-        if (page == 4u) { got_page4 = 1u; }
-        else if (page == 5u) { got_page5 = 1u; }
-        else if (page == 8u) { got_page8 = 1u; }
+        if (is_128k) {
+            if ((page >= 3u) && (page <= 10u)) {
+                got_mask = (uint8_t)(got_mask | (1u << (page - 3u)));
+            }
+        } else {
+            if (page == 4u) { got_page4 = 1u; }
+            else if (page == 5u) { got_page5 = 1u; }
+            else if (page == 8u) { got_page8 = 1u; }
+        }
     }
 
-    if ((got_page4 == 0u) || (got_page5 == 0u) || (got_page8 == 0u)) {
-        printf ("z80: missing pages (4=%u 5=%u 8=%u)\r\n",
-                (unsigned)got_page4, (unsigned)got_page5, (unsigned)got_page8);
-        return 0;
+    if (is_128k) {
+        if (got_mask != need_mask) {
+            printf ("z80: missing 128K pages (got=%02X need=%02X)\r\n",
+                    (unsigned)got_mask, (unsigned)need_mask);
+            return 0;
+        }
+    } else {
+        if ((got_page4 == 0u) || (got_page5 == 0u) || (got_page8 == 0u)) {
+            printf ("z80: missing pages (4=%u 5=%u 8=%u)\r\n",
+                    (unsigned)got_page4, (unsigned)got_page5, (unsigned)got_page8);
+            return 0;
+        }
     }
     return 1;
 }
@@ -401,8 +483,8 @@ static int z80_open_and_parse (const char *path, FIL *fp, Z80Header *out_hdr) {
             f_close (fp);
             return Z80L_ERR_VERSION;
         }
-        if (!z80_is_48k (out_hdr)) {
-            printf ("z80: hw_mode %u not supported (128K/SamRam?)\r\n",
+        if (!z80_is_supported (out_hdr)) {
+            printf ("z80: hw_mode %u not supported (SamRam/+3?)\r\n",
                     (unsigned)out_hdr->hw_mode);
             f_close (fp);
             return Z80L_ERR_VERSION;
@@ -449,6 +531,8 @@ int Z80_GetFileInfo (const char *path, Z80FileInfo *out) {
     out->compressed = (uint8_t)h.compressed;
     out->hw_mode    = h.hw_mode;
     out->is_48k     = (uint8_t)z80_is_48k (&h);
+    out->is_128k    = (uint8_t)z80_is_128k (&h);
+    out->page_7ffd  = h.page_7ffd;
     out->pc         = h.pc;
     out->sp         = h.sp;
     out->file_size  = 0u;
@@ -493,7 +577,7 @@ int Z80_LoadAndRun (const char *path) {
         if (h.version == 1u) {
             body_ok = z80_stream_body (&rd, &out, h.compressed);
         } else {
-            body_ok = z80_stream_v2v3_body (&rd, &out);
+            body_ok = z80_stream_v2v3_body (&rd, &out, z80_is_128k (&h));
         }
         if (!body_ok) {
             printf ("z80: body stream failed\r\n");
@@ -517,6 +601,24 @@ int Z80_LoadAndRun (const char *path) {
     state.iff1   = h.iff1;
     state.im     = h.im;
     state.border = h.border;
+
+    /* Set port 0x7FFD via PGCMD before triggering the launcher.
+     * For 48K (v1 or v2/v3 48K modes): write 0x30 = ROM1 + lock paging.
+     * For 128K: restore the snapshot's exact page_7ffd value but force
+     *   bit 4 (ROM1) so the 48K ROM is active during the launcher stub. */
+    {
+        uint8_t pval;
+        if (z80_is_128k (&h)) {
+            pval = (uint8_t)((h.page_7ffd & 0x3Fu) | 0x10u);  /* ROM1, snapshot page */
+        } else {
+            pval = 0x30u;  /* ROM1 + lock paging */
+        }
+        printf ("z80: setting 0x7FFD = 0x%02X\r\n", (unsigned)pval);
+        if (!ZX_128kPage (pval)) {
+            printf ("z80: PGCMD timeout before launch\r\n");
+            return Z80L_ERR_LAUNCH;
+        }
+    }
 
     printf ("z80: launching PC=%04X SP=%04X IM=%u IFF1=%u\r\n",
             (unsigned)state.pc, (unsigned)state.sp,

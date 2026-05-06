@@ -40,6 +40,13 @@ void ZX_RomcsRelease (void);
 void ZX_RomcsAssert  (void);
 void ZX_Z80Reset     (void);  /* pulse /RESET LOW then wait 1200ms for zxprog init */
 
+/* Send a byte to port 0x7FFD via the PGCMD NMI mailbox.
+ * Used to control 128K ROM/RAM paging from the CH32 side.
+ * On 48K hardware the Z80 OUT is a no-op; on 128K it selects the ROM
+ * and/or the RAM bank paged in at 0xC000.
+ * Returns 1 on success, 0 on timeout. */
+int ZX_128kPage (uint8_t val);
+
 /* Restore the full Z80 CPU state from a snapshot and launch the game.
  *
  * Sequence:

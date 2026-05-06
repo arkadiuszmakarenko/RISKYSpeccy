@@ -48,6 +48,11 @@
 #define KEY_SEQ_ADDR     0x3028u
 #define KEY_CODE_ADDR    0x3029u
 
+/* 128K paging command mailbox (CH32 → Z80: write value to port 0x7FFD) */
+#define PGCMD_SEQ_ADDR   0x302Au
+#define PGCMD_DONE_ADDR  0x302Bu
+#define PGCMD_VAL_ADDR   0x302Cu
+
 /* ZX RAM region to clear at startup (48K: 0x4000..0xFFFF) */
 #define ZX_RAM_BASE_ADDR 0x4000u
 #define ZX_RAM_SIZE      0xC000u
@@ -70,6 +75,10 @@
 
 #define KEY_SEQ      (*((volatile unsigned char *)KEY_SEQ_ADDR))
 #define KEY_CODE     (*((volatile unsigned char *)KEY_CODE_ADDR))
+
+#define PGCMD_SEQ    (*((volatile unsigned char *)PGCMD_SEQ_ADDR))
+#define PGCMD_DONE   (*((volatile unsigned char *)PGCMD_DONE_ADDR))
+#define PGCMD_VAL    (*((volatile unsigned char *)PGCMD_VAL_ADDR))
 
 #define RCMD_SEQ     (*((volatile unsigned char *)RCMD_SEQ_ADDR))
 #define RCMD_DONE    (*((volatile unsigned char *)RCMD_DONE_ADDR))
@@ -409,11 +418,37 @@ static void rcmd_poll(void)
    SDCC C name 'zx_launcher' maps to assembler symbol '_zx_launcher'. */
 extern void zx_launcher(void);
 
+/* Write a byte to port 0x7FFD.  Used by pgcmd_poll() to process the
+ * 128K paging command from the CH32.  Reads the value directly from
+ * PGCMD_VAL in cart RAM, avoiding SDCC calling-convention complications
+ * with __naked functions. */
+static void pgcmd_do_out(void) __naked
+{
+__asm
+    ld      a, (0x302C)     ; read PGCMD_VAL from cart RAM
+    ld      bc, #0x7FFD
+    out     (c), a          ; OUT (C), A with BC=0x7FFD
+    ret
+__endasm;
+}
+
+/* Poll the PGCMD mailbox; if a new command has arrived, write the
+ * requested byte to port 0x7FFD and acknowledge. */
+static void pgcmd_poll(void)
+{
+    unsigned char seq = PGCMD_SEQ;
+    if (seq != PGCMD_DONE) {
+        pgcmd_do_out();
+        PGCMD_DONE = seq;
+    }
+}
+
 /* ---- NMI C handler: called from _nmi_wrapper in crt0.s ---- */
 void nmi_handler_c(void)
 {
     wcmd_poll();
     rcmd_poll();
+    pgcmd_poll();
     kbd_poll_publish();
 }
 
@@ -430,11 +465,15 @@ void main(void)
     for (;;) {
         wcmd_poll();
         rcmd_poll();
+        pgcmd_poll();
         kbd_poll_publish();
         /* Launch trigger: CH32 writes 0x55 after loading snapshot RAM and
            regblock.  _zx_launcher restores all registers and jumps to the
            game PC; it never returns. */
         if (LAUNCH_TRIGGER == 0x55u) {
+            /* Port 0x7FFD has already been set to the correct value by
+             * the CH32 via PGCMD before writing the launch trigger.
+             * (ROM 1 selected + correct RAM bank for 48K and 128K modes.) */
             zx_launcher();
         }
     }

@@ -451,6 +451,12 @@ void RunCartWithRAM (void) {
 #define ZX_PIN_ROMCS GPIO_Pin_3
 
 /* Snapshot mailbox addresses in cart RAM (base 0x3000) */
+/* Snapshot mailbox addresses in cart RAM (base 0x3000) */
+#define ZX_PGCMD_SEQ_ADDR       0x302Au   /* CH32 increments to trigger OUT     */
+#define ZX_PGCMD_DONE_ADDR      0x302Bu   /* zxprog echoes SEQ when done        */
+#define ZX_PGCMD_VAL_ADDR       0x302Cu   /* byte to OUT to port 0x7FFD         */
+#define ZX_PGCMD_TIMEOUT_MS     200u
+
 #define ZX_LAUNCH_TRIGGER_ADDR  0x3F10u   /* CH32 writes 0x55 to fire launcher  */
 #define ZX_REGBLOCK_ADDR        0x3F90u   /* 26-byte register block for launcher */
 #define ZX_LAUNCHER_ALIVE_ADDR  0x3FAAu   /* launcher writes 0xAA when running  */
@@ -511,6 +517,32 @@ void ZX_Z80Reset (void) {
      /* zxprog now clears 48K RAM at startup; allow enough time for that
          work to complete before host-side loaders start mailbox traffic. */
      Delay_Ms (1200u);
+}
+
+int ZX_128kPage (uint8_t val) {
+    uint8_t  seq;
+    uint32_t waited;
+
+    if (state_pointer == NULL) { return 0; }
+
+    seq = state_pointer->ram[ZX_PGCMD_SEQ_ADDR - 0x3000u];
+    seq = (uint8_t)(seq == 0xFFu ? 1u : seq + 1u);
+
+    state_pointer->ram[ZX_PGCMD_VAL_ADDR - 0x3000u] = val;
+    __asm volatile ("" ::: "memory");
+    state_pointer->ram[ZX_PGCMD_SEQ_ADDR - 0x3000u] = seq;
+
+    ZX_TriggerNMI();
+
+    waited = 0u;
+    while (state_pointer->ram[ZX_PGCMD_DONE_ADDR - 0x3000u] != seq) {
+        Delay_Ms (1u);
+        if (++waited >= ZX_PGCMD_TIMEOUT_MS) {
+            printf ("z80: 128k page timeout (val=%02X)\r\n", (unsigned)val);
+            return 0;
+        }
+    }
+    return 1;
 }
 
 int ZX_LaunchZ80 (const ZX_Z80State *state) {

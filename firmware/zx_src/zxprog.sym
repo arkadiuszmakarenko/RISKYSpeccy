@@ -28,8 +28,10 @@ Symbol Table
   0 _kbd_row5_read                                                 000086 R
   0 _kbd_row6_read                                                 00008D R
   0 _kbd_row7_read                                                 000094 R
-  0 _main                                                          0005DB GR
-  0 _nmi_handler_c                                                 0005D2 GR
+  0 _main                                                          0005FA GR
+  0 _nmi_handler_c                                                 0005EE GR
+  0 _pgcmd_do_out                                                  0005D2 R
+  0 _pgcmd_poll                                                    0005DB R
   0 _rcmd_poll                                                     00059C R
   0 _wcmd_poll                                                     000516 R
   0 _wcmd_poll_load_border_cycle_65536_48                          000596 R
@@ -45,7 +47,7 @@ Hexadecimal [24-Bits]
 
 Area Table
 
-   0 _CODE                                      size    5F7   flags    0
+   0 _CODE                                      size    619   flags    0
    1 _DATA                                      size      9   flags    0
    2 _INITIALIZED                               size      0   flags    0
    3 _DABS                                      size      0   flags    8
