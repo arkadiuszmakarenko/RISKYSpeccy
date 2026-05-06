@@ -550,6 +550,80 @@ uint8_t usb_scsi_read_sector (uint32_t lba, uint8_t *buf, uint32_t block_size) {
     return 3;
 }
 
+// Single attempt: WRITE(10) one block
+static uint8_t scsi_write_sector_once (uint32_t lba, const uint8_t *buf, uint32_t block_size) {
+    CBW_t cbw;
+    CSW_t csw;
+    uint8_t res;
+    uint32_t bytes_sent = 0u;
+
+    memset (&cbw, 0, sizeof (cbw));
+    cbw.dCBWSignature = 0x43425355;
+    cbw.dCBWTag = 0xC0DEC0DE;
+    cbw.dCBWDataTransferLength = block_size;
+    cbw.bmCBWFlags = 0x00;  // OUT
+    cbw.bCBWLUN = 0;
+    cbw.bCBWCBLength = 10;
+    cbw.CBWCB[0] = 0x2A;  // WRITE(10)
+    cbw.CBWCB[2] = (uint8_t)((lba >> 24) & 0xFFu);
+    cbw.CBWCB[3] = (uint8_t)((lba >> 16) & 0xFFu);
+    cbw.CBWCB[4] = (uint8_t)((lba >> 8) & 0xFFu);
+    cbw.CBWCB[5] = (uint8_t)(lba & 0xFFu);
+    cbw.CBWCB[7] = 0x00u;
+    cbw.CBWCB[8] = 0x01u;  // one block
+
+    res = usb_send_cbw (&cbw);
+    if (res != ERR_SUCCESS) {
+        return 1;
+    }
+
+    while (bytes_sent < block_size) {
+        uint16_t plen = (uint16_t)(block_size - bytes_sent);
+        int retries = 0;
+
+        if (plen > 64u) {
+            plen = 64u;  // USB FS bulk max packet size
+        }
+
+        do {
+            res = USBFSH_SendEndpData (usb_out_ep, &out_tog, (uint8_t *)(buf + bytes_sent), plen);
+            if (res != ERR_SUCCESS) {
+                Delay_Ms (1u);
+                ++retries;
+            }
+        } while ((res != ERR_SUCCESS) && (retries < 20));
+
+        if (res != ERR_SUCCESS) {
+            return 2;
+        }
+        bytes_sent += plen;
+    }
+
+    res = usb_recv_csw (&csw);
+    if ((res != ERR_SUCCESS) || (csw.bCSWStatus != 0u)) {
+        return 3;
+    }
+
+    return 0;
+}
+
+// Public: WRITE(10) with sense+reset retry
+uint8_t usb_scsi_write_sector (uint32_t lba, const uint8_t *buf, uint32_t block_size) {
+    for (int attempt = 0; attempt < 2; ++attempt) {
+        uint8_t r = scsi_write_sector_once (lba, buf, block_size);
+        if (r == 0u) {
+            return 0u;
+        }
+        {
+            uint8_t sense[18] = {0};
+            (void)usb_scsi_request_sense (sense, sizeof(sense));
+        }
+        (void)msc_mass_storage_reset();
+        Delay_Ms (5u);
+    }
+    return 3u;
+}
+
 // (Removed test helper: INQUIRY)
 
 // SCSI REQUEST SENSE

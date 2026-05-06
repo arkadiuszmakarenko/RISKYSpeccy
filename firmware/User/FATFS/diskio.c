@@ -67,6 +67,29 @@ DRESULT disk_read (
 }
 
 /*-----------------------------------------------------------------------*/
+/* Write Sector(s)                                                       */
+/*-----------------------------------------------------------------------*/
+
+DRESULT disk_write (
+    BYTE pdrv,          /* Physical drive number to identify the drive */
+    const BYTE *buff,   /* Data to be written */
+    LBA_t sector,       /* Start sector in LBA */
+    UINT count          /* Number of sectors to write */
+) {
+    if (block_size != 512u) {
+        return RES_NOTRDY;
+    }
+
+    for (UINT i = 0u; i < count; ++i) {
+        if (usb_scsi_write_sector ((uint32_t)(sector + i), buff + i * 512u, block_size) != 0u) {
+            return RES_ERROR;
+        }
+    }
+
+    return RES_OK;
+}
+
+/*-----------------------------------------------------------------------*/
 /* Miscellaneous Functions                                               */
 /*-----------------------------------------------------------------------*/
 
