@@ -11,9 +11,6 @@ and provides:
 - **On-screen UI** — full-screen file browser and VT100-compatible terminal
   rendered by the CH32 onto the ZX screen via the NMI mailbox, without any
   Z80 cooperation.
-
-Current firmware version: **v3.3.0**
-
 ---
 
 ## Repository layout
