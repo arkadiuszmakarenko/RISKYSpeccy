@@ -44,15 +44,56 @@ int main (void) {
         }
     }
 
+     /* Show "Insert USB Drive" prompt on the ZX display and wait until the user
+         inserts a drive and presses Enter on the ZX keyboard. */
+     ZX_TerminalWaitUsbDriveReady();
+
     for (;;) {
         const char *pending;
+
+        /* Open file browser (blocks until the user selects a file or cancels). */
         ZX_TerminalCommandZ80Select (NULL);
+
+        /* z80 snapshot selected: load it and then wait here forever.  The
+           ZX is now running the snapshot; only a long-press hardware reset
+           (NVIC_SystemReset) makes sense at this point. */
         pending = ZX_TerminalPendingZ80Selection();
         if ((pending != NULL) && (pending[0] != '\0')) {
             printf ("z80select: loading %s\r\n", pending);
             (void)Z80_LoadAndRun (pending);
             ZX_TerminalClearPendingZ80Selection();
+            for (;;) { Handle_ResetButtonPA7(); }
         }
-        Handle_ResetButtonPA7();
+
+        /* .tap/.tzx selected: z80select already switched the ZX to BASIC and
+           queued the path.  Poll the button until the user short-presses to
+           start playback.  Do NOT clear pending here — the button handler
+           needs it to know which file to load. */
+        if ((ZX_TerminalPendingTapSelection() != NULL) &&
+            (ZX_TerminalPendingTapSelection()[0] != '\0')) {
+
+            /* Wait for a short press that actually starts the tape. */
+            while (!TAP_Player_IsRunning()) {
+                Handle_ResetButtonPA7();
+            }
+
+            /* Tape is running: keep polling (allows long-press reset). */
+            while (TAP_Player_IsRunning()) {
+                Handle_ResetButtonPA7();
+            }
+
+            /* Tape finished: clear selection and restore cart-ROM mode so the
+               file browser can be reopened on the next loop iteration. */
+            ZX_TerminalClearPendingTapSelection();
+            ZX_RomcsAssert();
+            ZX_Z80Reset();
+            {
+                uint8_t probe = 0u;
+                while (!ZX_BusReadBlock (0x0000u, &probe, 1u)) {
+                    Handle_ResetButtonPA7();
+                }
+            }
+        }
+        /* Nothing selected (user cancelled/escaped): loop and reopen browser. */
     }
 }

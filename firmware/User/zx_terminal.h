@@ -4,6 +4,7 @@
 #include <stdint.h>
 
 void ZX_TerminalInit (void);
+void ZX_TerminalWaitUsbDriveReady (void);
 
 void ZX_TerminalCommandViewOff (void);
 void ZX_TerminalCommandView (uint16_t address, uint8_t length);

@@ -6,6 +6,7 @@
 #include "tape_player.h"
 #include "z80_loader.h"
 #include "zx_bus.h"
+#include "usb_disk.h"
 
 #include <ctype.h>
 #include <stdio.h>
@@ -1067,6 +1068,84 @@ static int ZX_BrowserRender (const char *path, uint8_t selected) {
                     (unsigned)s_browser_count);
     ZX_TermModelWriteAt (23u, 0u, line, normal_attr);
     return ZX_TermCommit();
+}
+
+/* Show the "Insert USB Drive" prompt screen.  had_error != 0 adds a
+   second line indicating the previous attempt failed. */
+static void ZX_ShowUsbPromptScreen (int had_error) {
+    uint8_t normal_attr = (uint8_t)((7u << 3) | 0u);  /* white bg, black fg */
+    uint8_t warn_attr   = (uint8_t)((6u << 3) | 0u);  /* yellow bg, black fg */
+    uint8_t err_attr    = (uint8_t)((1u << 3) | 7u);  /* red bg, white fg */
+
+    ZX_TermModelClear();
+    ZX_TermModelWriteAt (0u, 0u, "RISKY SPECCY", normal_attr);
+    ZX_TermModelWriteAt (0u, 14u, FIRMWARE_VERSION_STRING, normal_attr);
+    ZX_TermModelWriteAt (2u, 0u, "INSERT USB DRIVE", warn_attr);
+    ZX_TermModelWriteAt (4u, 0u, "PRESS ENTER TO CONTINUE", normal_attr);
+    if (had_error) {
+        ZX_TermModelWriteAt (6u, 0u, "USB DRIVE NOT DETECTED", err_attr);
+        ZX_TermModelWriteAt (7u, 0u, "TRY AGAIN", err_attr);
+    }
+    if (!ZX_TermCommit()) {
+        printf ("WARN: USB prompt commit failed\r\n");
+    }
+}
+
+/* Block until a USB MSC drive is detected.  Displays a ZX-screen prompt asking
+   the user to insert the drive and press Enter; retries with an error notice if
+   the drive is still absent when Enter is pressed. */
+void ZX_TerminalWaitUsbDriveReady (void) {
+    int draw_suspended = 0;
+    int had_error = 0;
+
+    /* Fast path: if USB is already enumerated, go straight to the menu. */
+    {
+        uint8_t usb_ret = USBH_PreDeal();
+        if (usb_ret == DEF_SUCCESS) {
+            printf ("USB drive already ready\r\n");
+            return;
+        }
+    }
+
+    if (!ZX_WaitNmiMailboxReady (5000u)) {
+        printf ("ERR: USB prompt mailbox not ready\r\n");
+        return;
+    }
+
+    s_selector_font_mode = 1u;
+    ZX_CartDrawSuspend();
+    Delay_Ms (50u);
+    draw_suspended = 1;
+
+    for (;;) {
+        ZX_ShowUsbPromptScreen (had_error);
+
+        /* Wait for Enter on the ZX keyboard. */
+        for (;;) {
+            uint8_t key = 0u;
+            int rc = ZX_KeyPoll (&key);
+            if (rc < 0) { break; }
+            if ((rc > 0) && ZX_IsEnterKey (key)) { break; }
+            Delay_Ms (20u);
+        }
+
+        /* Check USB readiness. */
+        {
+            uint8_t usb_ret = USBH_PreDeal();
+            if (usb_ret == DEF_SUCCESS) {
+                printf ("USB drive ready\r\n");
+                break;
+            }
+            printf ("USB not ready (ret=%d), re-prompting\r\n", (int)usb_ret);
+            had_error = 1;
+        }
+    }
+
+    s_selector_font_mode = 0u;
+    if (draw_suspended) {
+        ZX_TerminalMarkBridgeDirty();
+        ZX_CartDrawResume();
+    }
 }
 
 void ZX_TerminalInit (void) {
