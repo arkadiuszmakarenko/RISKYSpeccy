@@ -1,4 +1,4 @@
-# RISKYZXSpectrum
+# RISKYSpeccy
 
 A CH32V307 RISC-V cartridge that plugs into the ZX Spectrum edge connector
 and provides:
