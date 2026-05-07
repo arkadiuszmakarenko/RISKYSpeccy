@@ -2,12 +2,14 @@
 #include "gpio.h"
 #include "tape_player.h"
 #include "usb_disk.h"
+#include "z80_loader.h"
 #include "zx_bus.h"
-#include "zx_monitor.h"
 #include "zx_image.h"
 #include "zx_terminal.h"
 #include "reset_button.h"
 #include "ff.h"
+
+#include <stdio.h>
 
 static FATFS s_fatfs;
 
@@ -31,12 +33,26 @@ int main (void) {
     }
     printf ("Hello from RISKY ZX Spectrum firmware!\n");
 
-    ZX_Monitor_Init();
-    ZX_Monitor_AutoStartZ80Select();
+    setvbuf (stdout, NULL, _IONBF, 0);
+    ZX_TerminalInit();
 
+    /* Wait until ZX bus is accessible, then launch the file browser loop. */
+    {
+        uint8_t probe = 0u;
+        while (!ZX_BusReadBlock (0x0000u, &probe, 1u)) {
+            Handle_ResetButtonPA7();
+        }
+    }
 
-    while (1) {
+    for (;;) {
+        const char *pending;
+        ZX_TerminalCommandZ80Select (NULL);
+        pending = ZX_TerminalPendingZ80Selection();
+        if ((pending != NULL) && (pending[0] != '\0')) {
+            printf ("z80select: loading %s\r\n", pending);
+            (void)Z80_LoadAndRun (pending);
+            ZX_TerminalClearPendingZ80Selection();
+        }
         Handle_ResetButtonPA7();
-        ZX_Monitor_Poll();
     }
 }

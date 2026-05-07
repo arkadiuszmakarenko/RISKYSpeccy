@@ -21,6 +21,13 @@ TOOLCHAIN_DIR ?= /home/makaron/RISC-V_Embedded_GCC12
 TOOLCHAIN_BIN := $(TOOLCHAIN_DIR)/bin
 TOOL_PREFIX := riscv-wch-elf-
 
+# MounRiver Studio toolchain root (used for OpenOCD flashing).
+# Override on the command line if installed elsewhere:
+#   make flash MRS_TOOLCHAIN_ROOT=/path/to/MRS_Toolchain_Linux_x64_V1.91
+MRS_TOOLCHAIN_ROOT ?= /usr/share/MRS2/MRS-linux-x64/resources/app/resources/linux/components/WCH/OpenOCD
+OPENOCD          := $(MRS_TOOLCHAIN_ROOT)/OpenOCD/bin/openocd
+OPENOCD_CFG      := $(MRS_TOOLCHAIN_ROOT)/OpenOCD/bin/wch-riscv.cfg
+
 CC      := $(TOOLCHAIN_BIN)/$(TOOL_PREFIX)gcc
 OBJCOPY := $(TOOLCHAIN_BIN)/$(TOOL_PREFIX)objcopy
 OBJDUMP := $(TOOLCHAIN_BIN)/$(TOOL_PREFIX)objdump
@@ -76,11 +83,9 @@ C_SRCS := \
 	$(FW_DIR)/User/reset_button.c \
 	$(FW_DIR)/User/system_ch32v30x.c \
 	$(FW_DIR)/User/tape_player.c \
-	$(FW_DIR)/User/utils.c \
 	$(FW_DIR)/User/z80_loader.c \
 	$(FW_DIR)/User/zx_bus.c \
 	$(FW_DIR)/User/zx_image.c \
-	$(FW_DIR)/User/zx_monitor.c \
 	$(FW_DIR)/User/zx_terminal.c \
 	$(FW_DIR)/User/FATFS/diskio.c \
 	$(FW_DIR)/User/FATFS/ff.c \
@@ -123,7 +128,7 @@ HEX := $(BUILD_DIR)/$(TARGET).hex
 LST := $(BUILD_DIR)/$(TARGET).lst
 SIZ := $(BUILD_DIR)/$(TARGET).siz
 
-.PHONY: all clean rebuild check-toolchain check-zx-tools zx-src
+.PHONY: all clean rebuild check-toolchain check-zx-tools zx-src flash erase
 
 all: check-toolchain check-zx-tools zx-src $(ELF) $(BIN) $(HEX) $(LST) $(SIZ)
 
@@ -228,3 +233,30 @@ check-zx-tools:
 
 # Ensure generated ZX ROM image sources are refreshed before any CH32 object build.
 $(OBJS): | zx-src
+
+# Flash the firmware binary to the CH32 via WCH-LinkE and MRS OpenOCD.
+# Requires sudo for USB access.  Build first if the binary is missing.
+flash: $(BIN)
+	@if [ ! -f "$(OPENOCD)" ]; then \
+		echo "Error: OpenOCD not found at $(OPENOCD)"; \
+		echo "Set MRS_TOOLCHAIN_ROOT, for example:"; \
+		echo "  make flash MRS_TOOLCHAIN_ROOT=/path/to/MRS_Toolchain_Linux_x64_V1.91"; \
+		exit 1; \
+	fi
+	@echo "Flashing $(BIN) ..."
+	sudo "$(OPENOCD)" \
+		-f "$(OPENOCD_CFG)" \
+		-c "program $(shell pwd)/$(BIN) verify reset exit 0x00000000"
+
+# Erase the entire CH32 flash chip.
+erase:
+	@if [ ! -f "$(OPENOCD)" ]; then \
+		echo "Error: OpenOCD not found at $(OPENOCD)"; \
+		echo "Set MRS_TOOLCHAIN_ROOT, for example:"; \
+		echo "  make erase MRS_TOOLCHAIN_ROOT=/path/to/MRS_Toolchain_Linux_x64_V1.91"; \
+		exit 1; \
+	fi
+	@echo "Erasing flash ..."
+	sudo "$(OPENOCD)" \
+		-f "$(OPENOCD_CFG)" \
+		-c "init; halt; flash erase_sector wch_riscv 0 last; exit"

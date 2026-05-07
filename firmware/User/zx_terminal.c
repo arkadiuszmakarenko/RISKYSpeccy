@@ -1,6 +1,7 @@
 #include "zx_terminal.h"
 
 #include "debug.h"
+#include "version.h"
 #include "ff.h"
 #include "tape_player.h"
 #include "z80_loader.h"
@@ -31,8 +32,8 @@
 #define ZX_SCREEN_DIFF_MERGE_GAP 16u
 
 #define ZX_BROWSER_MAX_FILES 64u
-#define ZX_BROWSER_NAME_MAX 160u
-#define ZX_BROWSER_PATH_MAX 196u
+#define ZX_BROWSER_NAME_MAX (FF_MAX_LFN + 1u)
+#define ZX_BROWSER_PATH_MAX 320u
 #define ZX_BROWSER_PAGE_ROWS 18u
 #define ZX_BROWSER_SCAN_RETRIES 8u
 #define ZX_BROWSER_RENDER_RETRIES 20u
@@ -695,6 +696,10 @@ static int ZX_HasTzxExtension (const char *name) {
            (tolower ((unsigned char)name[3]) == 'x');
 }
 
+static int ZX_IsEnterKey (uint8_t key) {
+    return (key == '\n') || (key == '\r');
+}
+
 static int ZX_BrowserLoadFiles (const char *path) {
     DIR dir;
     FILINFO fno;
@@ -817,6 +822,23 @@ static void ZX_WaitAnyKey (void) {
     }
 }
 
+/* Wait for any key and treat '0' as cancel on tape-ready screens.
+   Returns: 1 = proceed to BASIC, 0 = cancel, -1 = read error. */
+static int ZX_WaitAnyKeyOrCancel0 (void) {
+    for (;;) {
+        uint8_t key = 0u;
+        int rc = ZX_KeyPoll (&key);
+
+        if (rc < 0) {
+            return -1;
+        }
+        if (rc > 0) {
+            return (key == '0') ? 0 : 1;
+        }
+        Delay_Ms (20u);
+    }
+}
+
 static const char *ZX_Z80HwModeText (uint8_t version, uint8_t hw_mode) {
     if (version <= 1u) { return "48K"; }
     if (version == 2u) {
@@ -855,6 +877,7 @@ static int ZX_BrowserShowZ80Info (const char *path, const Z80FileInfo *info) {
 
     ZX_TermModelClear();
     ZX_TermModelWriteAt (0u, 0u, "RISKY SPECCY", normal_attr);
+    ZX_TermModelWriteAt (0u, 14u, FIRMWARE_VERSION_STRING, normal_attr);
     ZX_TermModelWriteAt (2u, 0u, "Z80 SNAPSHOT INFO", title_attr);
 
     ZX_TermModelWriteAt (4u, 0u, (path != NULL) ? path : "(unknown)", normal_attr);
@@ -914,6 +937,7 @@ static int ZX_BrowserShowLoadError (const char *path, int rc) {
 
     ZX_TermModelClear();
     ZX_TermModelWriteAt (0u, 0u, "RISKY SPECCY", normal_attr);
+    ZX_TermModelWriteAt (0u, 14u, FIRMWARE_VERSION_STRING, normal_attr);
     ZX_TermModelWriteAt (2u, 0u, "Z80 LOAD ERROR", alert_attr);
     ZX_TermModelWriteAt (4u, 0u, msg, red_attr);
     ZX_TermModelWriteAt (6u, 0u, "FILE:", normal_attr);
@@ -936,13 +960,14 @@ static int ZX_BrowserShowTapReady (const char *path) {
 
     ZX_TermModelClear();
     ZX_TermModelWriteAt (0u, 0u, "RISKY SPECCY", normal_attr);
+    ZX_TermModelWriteAt (0u, 14u, FIRMWARE_VERSION_STRING, normal_attr);
     ZX_TermModelWriteAt (2u, 0u, "TAPE READY", alert_attr);
     ZX_TermModelWriteAt (3u, 0u, "FILE:", normal_attr);
     ZX_TermModelWriteAt (4u, 0u, (path != NULL) ? path : "(unknown)", normal_attr);
     ZX_TermModelWriteAt (6u, 0u, "TYPE LOAD \"\" AND PRESS ENTER", normal_attr);
     ZX_TermModelWriteAt (8u, 0u, "SHORT-PRESS PLAY/RESET BUTTON", normal_attr);
     ZX_TermModelWriteAt (9u, 0u, "TO START PLAYBACK", normal_attr);
-    ZX_TermModelWriteAt (11u, 0u, "PRESS ANY KEY TO LOAD BASIC", red_attr);
+    ZX_TermModelWriteAt (11u, 0u, "ANY KEY LOAD BASIC 0 CANCEL", red_attr);
 
 
     return ZX_TermCommit();
@@ -992,6 +1017,7 @@ static int ZX_BrowserRender (const char *path, uint8_t selected) {
 
     ZX_TermModelClear();
     ZX_TermModelWriteAt (0u, 0u, "RISKY SPECCY", normal_attr);
+    ZX_TermModelWriteAt (0u, 14u, FIRMWARE_VERSION_STRING, normal_attr);
     ZX_TermModelWriteAt (1u, 0u, ((path != NULL) && (path[0] != '\0')) ? path : "/", normal_attr);
     ZX_TermModelWriteAt (2u, 0u, "Q/A MOVE  O/P PAGE", normal_attr);
     if (s_browser_stack_depth > 0u) {
@@ -1315,7 +1341,7 @@ void ZX_TerminalCommandZ80Select (const char *path) {
             suppress_enter_loops = 0u;
             continue;
         }
-        if (key == '\n') {
+        if (ZX_IsEnterKey (key)) {
             if (suppress_enter_loops > 0u) {
                 continue;
             }
@@ -1370,8 +1396,21 @@ void ZX_TerminalCommandZ80Select (const char *path) {
                 }
                 printf ("z80select: queued tap %s\r\n", full_path);
                 printf ("z80select: type LOAD \"\" and press Enter on the Spectrum, then short-press Play/Reset button to start playback\r\n");
-                printf ("z80select: press any Spectrum key now to return to BASIC\r\n");
-                ZX_WaitAnyKey();
+                printf ("z80select: press any Spectrum key to return to BASIC (0 cancels)\r\n");
+                {
+                    int go_basic = ZX_WaitAnyKeyOrCancel0();
+                    if (go_basic < 0) {
+                        printf ("ERR: key mailbox read failed\r\n");
+                        goto done;
+                    }
+                    if (go_basic == 0) {
+                        if (!ZX_BrowserRenderRetry (cur_path, selected)) {
+                            printf ("WARN: z80select redraw timeout\r\n");
+                        }
+                        suppress_enter_loops = 20u;
+                        continue;
+                    }
+                }
                 s_selector_font_mode = 0u;
                 if (draw_suspended) {
                     ZX_TerminalMarkBridgeDirty();
@@ -1396,7 +1435,7 @@ void ZX_TerminalCommandZ80Select (const char *path) {
                             int krc = ZX_KeyPoll (&ikey);
                             if (krc < 0) { break; }
                             if (krc > 0) {
-                                if (ikey == '\n') { confirmed = 1; }
+                                if (ZX_IsEnterKey (ikey)) { confirmed = 1; }
                                 break;
                             }
                             Delay_Ms (20u);
@@ -1560,7 +1599,7 @@ void ZX_TerminalCommandTapSelect (const char *path) {
             suppress_enter_loops = 0u;
             continue;
         }
-        if (key != '\n') {
+        if (!ZX_IsEnterKey (key)) {
             continue;
         }
         if (suppress_enter_loops > 0u) {
@@ -1615,8 +1654,21 @@ void ZX_TerminalCommandTapSelect (const char *path) {
         }
         printf ("tapselect: queued %s\r\n", full_path);
         printf ("tapselect: type LOAD \"\" and press Enter on the Spectrum, then short-press BUTTON to start playback\r\n");
-        printf ("tapselect: press any Spectrum key now to return to BASIC\r\n");
-        ZX_WaitAnyKey();
+        printf ("tapselect: press any Spectrum key to return to BASIC (0 cancels)\r\n");
+        {
+            int go_basic_now = ZX_WaitAnyKeyOrCancel0();
+            if (go_basic_now < 0) {
+                printf ("ERR: key mailbox read failed\r\n");
+                goto done;
+            }
+            if (go_basic_now == 0) {
+                if (!ZX_BrowserRenderRetry (cur_path, selected)) {
+                    printf ("WARN: tapselect redraw timeout\r\n");
+                }
+                suppress_enter_loops = 20u;
+                continue;
+            }
+        }
         go_to_basic = 1;
         goto done;
     }

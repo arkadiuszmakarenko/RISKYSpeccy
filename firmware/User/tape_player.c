@@ -37,7 +37,7 @@
  *   T-state ≈ 72e6 / 3.5e6 = 20.57 → rounded to 20 ticks (~3 % short,
  *   well within the ±10 % tolerance of the ZX ROM tape loader).
  *
- * Trigger flow (from zx_monitor)
+ * Trigger flow (from terminal loader)
  * --------------------------------
  *   1. ZX_RomcsRelease()          — tristate cart ROMCS; ZX ULA ROM visible
  *   2. ZX_Z80Reset()              — Z80 boots to Spectrum BASIC prompt

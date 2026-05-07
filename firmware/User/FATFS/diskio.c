@@ -10,7 +10,6 @@
 #include "ff.h"     /* Obtains integer types */
 #include "diskio.h" /* Declarations of disk functions */
 #include "usb_disk.h"
-#include "utils.h"
 
 /* Definitions of physical drive number for each drive */
 #define DEV_RAM 0 /* Example: Map Ramdisk to physical drive 0 */
@@ -18,7 +17,6 @@
 #define DEV_USB 2 /* Example: Map USB MSD to physical drive 2 */
 
 static uint32_t block_count = 0, block_size = 0;
-extern CircularBuffer scb;
 
 /*-----------------------------------------------------------------------*/
 /* Get Drive Status                                                      */

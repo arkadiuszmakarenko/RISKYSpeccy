@@ -14,7 +14,7 @@
  *                   drives data bus bits with current EAR value whenever
  *                   a ULA-port IN (A0=0, /RD active) is detected.
  *
- * Usage from zx_monitor:
+ * Usage from the terminal load flow:
  *   1. TAP_Player_Load(path)   — load .tap/.tzx file from USB into internal buffer
  *   2. TAP_Player_Start()      — configure TIM2 + EXTI9_5 and begin playback
  *      (call ZX_RomcsRelease + ZX_Z80Reset before this so Spectrum ROM runs)
