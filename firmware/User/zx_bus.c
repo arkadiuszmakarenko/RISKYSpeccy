@@ -386,7 +386,6 @@ void Init_Cart() {
     (void)ZX_CartRamReadBlock (ZX_KEY_SEQ_ADDR, &s_key_last_seq, 1u);
 }
 
-__attribute__((section(".text.fastirq"), aligned(64), noinline))
 void RunCartWithRAM (void) {
     struct ZXCartState *sp = state_pointer;
     uint16_t address = (uint16_t)GPIOE->INDR;

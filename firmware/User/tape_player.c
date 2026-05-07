@@ -335,7 +335,6 @@ static int TAP_NextBit (void) {
 /* TIM2 ISR — tape state machine                                        */
 /* ------------------------------------------------------------------ */
 
-__attribute__((section(".text.fastirq"), aligned(64), noinline))
 void TAP_TimerISR (void) {
     TIM2->INTFR = 0u;   /* acknowledge UIF                             */
 
@@ -431,7 +430,6 @@ void TAP_TimerISR (void) {
 /* IORQ ISR — respond to IN A,(#FE) with current EAR bit               */
 /* ------------------------------------------------------------------ */
 
-__attribute__((section(".text.fastirq"), aligned(64), noinline))
 void TAP_IorqISR (void) {
     /*
      * /IORQ (PC8) just fell LOW.

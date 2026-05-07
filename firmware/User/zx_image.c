@@ -1,5 +1,5 @@
-/* AUTO-GENERATED — do not edit by hand.
- * Rebuilt by: make -C firmware/zx_src
+/* AUTO-GENERATED -- do not edit by hand.
+ * Rebuilt by: make
  */
 #include "zx_image.h"
 
