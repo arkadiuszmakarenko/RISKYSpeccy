@@ -11,7 +11,7 @@ void ZX_TerminalCommandView (uint16_t address, uint8_t length);
 void ZX_TerminalCommandBridgeText (char *firstToken);
 void ZX_TerminalCommandTermInit (void);
 void ZX_TerminalCommandTermWrite (char *firstToken);
-void ZX_TerminalCommandZ80Select (const char *path);
+int  ZX_TerminalCommandZ80Select (const char *path);  /* returns 1 if a z80 game was launched */
 void ZX_TerminalCommandTapSelect (const char *path);
 
 const char *ZX_TerminalPendingZ80Selection (void);

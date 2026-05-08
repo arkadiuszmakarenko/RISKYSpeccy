@@ -2,7 +2,6 @@
 #include "gpio.h"
 #include "tape_player.h"
 #include "usb_disk.h"
-#include "z80_loader.h"
 #include "zx_bus.h"
 #include "zx_image.h"
 #include "zx_terminal.h"
@@ -49,19 +48,10 @@ int main (void) {
      ZX_TerminalWaitUsbDriveReady();
 
     for (;;) {
-        const char *pending;
-
         /* Open file browser (blocks until the user selects a file or cancels). */
-        ZX_TerminalCommandZ80Select (NULL);
-
-        /* z80 snapshot selected: load it and then wait here forever.  The
-           ZX is now running the snapshot; only a long-press hardware reset
-           (NVIC_SystemReset) makes sense at this point. */
-        pending = ZX_TerminalPendingZ80Selection();
-        if ((pending != NULL) && (pending[0] != '\0')) {
-            printf ("z80select: loading %s\r\n", pending);
-            (void)Z80_LoadAndRun (pending);
-            ZX_TerminalClearPendingZ80Selection();
+        if (ZX_TerminalCommandZ80Select (NULL)) {
+            /* Z80 game launched inside the terminal; spin here forever.
+               Only a long-press hardware reset makes sense at this point. */
             for (;;) { Handle_ResetButtonPA7(); }
         }
 

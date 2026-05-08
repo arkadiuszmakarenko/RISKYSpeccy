@@ -1308,12 +1308,13 @@ void ZX_TerminalCommandTermWrite (char *firstToken) {
     }
 }
 
-void ZX_TerminalCommandZ80Select (const char *path) {
+int ZX_TerminalCommandZ80Select (const char *path) {
     uint8_t selected = 0u;
     uint8_t suppress_enter_loops = 0u;
     char full_path[ZX_BROWSER_PATH_MAX];
     char cur_path[ZX_BROWSER_PATH_MAX];
     int draw_suspended = 0;
+    int launched = 0;
 
     s_browser_mode = ZX_BROWSER_MODE_Z80;
     s_z80select_pending[0] = '\0';
@@ -1533,6 +1534,7 @@ void ZX_TerminalCommandZ80Select (const char *path) {
                         int load_rc = Z80_LoadAndRun (full_path);
                         if (load_rc == Z80L_OK) {
                             s_z80select_pending[0] = '\0';
+                            launched = 1;
                             goto done;
                         }
 
@@ -1563,6 +1565,7 @@ done:
         ZX_TerminalMarkBridgeDirty();
         ZX_CartDrawResume();
     }
+    return launched;
 }
 
 void ZX_TerminalCommandTapSelect (const char *path) {
