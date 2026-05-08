@@ -82,17 +82,11 @@ int main (void) {
                 Handle_ResetButtonPA7();
             }
 
-            /* Tape finished: clear selection and restore cart-ROM mode so the
-               file browser can be reopened on the next loop iteration. */
+            /* Tape finished: the Z80 is now running the loaded program.
+               Spin here like the z80 snapshot path — only a long-press
+               hardware reset (NVIC_SystemReset) makes sense at this point. */
             ZX_TerminalClearPendingTapSelection();
-            ZX_RomcsAssert();
-            ZX_Z80Reset();
-            {
-                uint8_t probe = 0u;
-                while (!ZX_BusReadBlock (0x0000u, &probe, 1u)) {
-                    Handle_ResetButtonPA7();
-                }
-            }
+            for (;;) { Handle_ResetButtonPA7(); }
         }
         /* Nothing selected (user cancelled/escaped): loop and reopen browser. */
     }
