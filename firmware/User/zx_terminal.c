@@ -1131,7 +1131,33 @@ void ZX_TerminalWaitUsbDriveReady (void) {
 
         /* Check USB readiness. */
         {
-            uint8_t usb_ret = USBH_PreDeal();
+            uint8_t usb_ret = DEF_DEFAULT;
+            uint8_t tries;
+
+            /* Give the host stack time to observe attach/enumeration transitions. */
+            for (tries = 0; tries < 100; ++tries) {
+                usb_ret = USBH_PreDeal();
+                if (usb_ret == DEF_SUCCESS) {
+                    break;
+                }
+                Delay_Ms (20u);
+            }
+
+            /* If still in default state, reset host state once and retry briefly. */
+            if (usb_ret == DEF_DEFAULT) {
+                ClearUSB();
+                USB_Initialization();
+                Delay_Ms (50u);
+
+                for (tries = 0; tries < 50; ++tries) {
+                    usb_ret = USBH_PreDeal();
+                    if (usb_ret == DEF_SUCCESS) {
+                        break;
+                    }
+                    Delay_Ms (20u);
+                }
+            }
+
             if (usb_ret == DEF_SUCCESS) {
                 printf ("USB drive ready\r\n");
                 break;

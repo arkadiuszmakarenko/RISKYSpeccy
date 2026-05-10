@@ -6,6 +6,7 @@
 #include "stdio.h"
 #include "string.h"
 #include "ch32v30x.h"
+#include "ch32v30x_rcc.h"
 #include "ch32v30x_usbfs_host.h"
 #include "usb_host_config.h"
 #include "ff.h"

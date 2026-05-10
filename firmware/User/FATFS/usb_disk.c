@@ -319,9 +319,20 @@ uint8_t USBH_PreDeal (void) {
     uint8_t usb_port = DEF_USB_PORT_FS;
     uint8_t index;
     uint8_t ret;
+    uint8_t hw_attached;
 
     // Check current port status
     ret = USBFSH_CheckRootHubPortStatus (RootHubDev[usb_port].bStatus);
+    hw_attached = ((USBFSH->MIS_ST & USBFS_UMS_DEV_ATTACH) != 0) ? 1 : 0;
+
+    /*
+     * If device is already present at startup, detect interrupt may not fire.
+     * Synthesize a connect event so enumeration can start without replug.
+     */
+    if ((ret == ROOT_DEV_FAILED) && hw_attached &&
+        (RootHubDev[usb_port].bStatus != ROOT_DEV_SUCCESS)) {
+        ret = ROOT_DEV_CONNECTED;
+    }
 
     if (ret == ROOT_DEV_CONNECTED) {
         // Only enumerate if not already enumerated

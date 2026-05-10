@@ -1,29 +1,14 @@
-# Root firmware build (independent from firmware/obj).
-#
-# Toolchain requirements:
-#   1) WCH RISC-V GCC toolchain (for CH32 firmware)
-#      - Expected via TOOLCHAIN_DIR (default below)
-#      - Required binaries in $(TOOLCHAIN_DIR)/bin:
-#          riscv-wch-elf-gcc, riscv-wch-elf-objcopy,
-#          riscv-wch-elf-objdump, riscv-wch-elf-size
-#   2) ZX ROM build tools (for firmware/zx_src -> firmware/User/zx_image.c)
-#      - sdcc
-#      - sdasz80
-#      - objcopy (GNU binutils)
-#      - od, awk (for bin -> C array conversion)
-#
-# Usage:
-#   make
-#   make TOOLCHAIN_DIR=/path/to/RISC-V_Embedded_GCC12
-#   make clean
+# Unified build for:
+# - Bootloader (linked at 0x00000000, 16KB region)
+# - Application for bootloader update flow (linked at 0x00004000) -> RISKYZXS.UPD
+# - Standalone application (linked at 0x00000000)
+# - Combined flash image: bootloader + app-update image
 
 TOOLCHAIN_DIR ?= /home/makaron/RISC-V_Embedded_GCC12
 TOOLCHAIN_BIN := $(TOOLCHAIN_DIR)/bin
 TOOL_PREFIX := riscv-wch-elf-
 
-# MounRiver Studio toolchain root (used for OpenOCD flashing).
-# Override on the command line if installed elsewhere:
-#   make flash MRS_TOOLCHAIN_ROOT=/path/to/MRS_Toolchain_Linux_x64_V1.91
+# MounRiver Studio OpenOCD root.
 MRS_TOOLCHAIN_ROOT ?= /usr/share/MRS2/MRS-linux-x64/resources/app/resources/linux/components/WCH/OpenOCD
 OPENOCD          := $(MRS_TOOLCHAIN_ROOT)/OpenOCD/bin/openocd
 OPENOCD_CFG      := $(MRS_TOOLCHAIN_ROOT)/OpenOCD/bin/wch-riscv.cfg
@@ -37,12 +22,21 @@ ZX_SDCC ?= sdcc
 ZX_SDAZ80 ?= sdasz80
 ZX_OBJCOPY ?= objcopy
 
-TARGET := RISKYSpeccy
 BUILD_DIR ?= build
 
+# Paths
 FW_DIR := firmware
-LINKER_SCRIPT := $(FW_DIR)/Ld/Link.ld
+BL_DIR := Bootloader
 
+# Targets and linker scripts
+APP_TARGET := RISKYSpeccy
+APP_UPD_NAME := RISKYZXS.UPD
+COMBINED_NAME := RISKYZXS_COMBINED.bin
+APP_LINKER_BOOT := $(FW_DIR)/Ld/Link.ld
+APP_LINKER_STANDALONE := $(FW_DIR)/Ld/Link_standalone.ld
+BL_LINKER := $(BL_DIR)/Ld/Link.ld
+
+# ZX ROM build inputs
 ZX_DIR := $(FW_DIR)/zx_src
 ZX_BUILD_DIR ?= $(BUILD_DIR)/zx_src
 ZX_TARGET := zxprog
@@ -51,15 +45,14 @@ ZX_OUT_C := $(FW_DIR)/User/zx_image.c
 ZX_CRT0_SRC := $(ZX_DIR)/crt0.s
 ZX_PROG_SRC := $(ZX_DIR)/zxprog.c
 ZX_HDR := $(ZX_DIR)/zx.h
-
 ZX_CRT0_REL := $(ZX_BUILD_DIR)/crt0.rel
 ZX_IHX := $(ZX_BUILD_DIR)/$(ZX_TARGET).ihx
 ZX_BIN := $(ZX_BUILD_DIR)/$(ZX_TARGET).bin
-
 ZX_SDCFLAGS := -mz80 --no-std-crt0 --code-loc 0x0069 --data-loc 0x3F00 \
 	--no-xinit-opt
 
-C_SRCS := \
+# Firmware sources
+APP_C_SRCS := \
 	$(FW_DIR)/Core/core_riscv.c \
 	$(FW_DIR)/Debug/debug.c \
 	$(FW_DIR)/Peripheral/src/ch32v30x_dac.c \
@@ -94,62 +87,197 @@ C_SRCS := \
 	$(FW_DIR)/User/FATFS/usb_disk.c \
 	$(FW_DIR)/User/USB_Host/ch32v30x_usbfs_host.c
 
-ASM_SRCS := $(FW_DIR)/Startup/startup_ch32v30x_D8.S
+APP_ASM_SRCS := $(FW_DIR)/Startup/startup_ch32v30x_D8.S
 
-CFLAGS := -march=rv32imacxw -mabi=ilp32 -msmall-data-limit=8 -msave-restore \
-	-fmax-errors=20 -Ofast -fmessage-length=0 -fsigned-char \
-	-ffunction-sections -fdata-sections -fno-common -Wunused -Wuninitialized \
-	-std=gnu99
+# Bootloader sources
+BL_C_SRCS := \
+	$(wildcard $(BL_DIR)/Core/*.c) \
+	$(wildcard $(BL_DIR)/Debug/*.c) \
+	$(wildcard $(BL_DIR)/Peripheral/src/*.c) \
+	$(wildcard $(BL_DIR)/User/*.c) \
+	$(wildcard $(BL_DIR)/User/Host_IAP/*.c) \
+	$(wildcard $(BL_DIR)/User/Pff/*.c) \
+	$(wildcard $(BL_DIR)/User/USB_Host/*.c)
 
-CPPFLAGS := \
+BL_ASM_SRCS := $(BL_DIR)/Startup/startup_ch32v30x_D8.S
+
+# Flags
+COMMON_ARCH_FLAGS := -march=rv32imacxw -mabi=ilp32 -msmall-data-limit=8 -msave-restore
+COMMON_WARN_FLAGS := -fmax-errors=20 -fmessage-length=0 -fsigned-char -ffunction-sections \
+	-fdata-sections -fno-common -Wunused -Wuninitialized
+
+APP_CFLAGS := $(COMMON_ARCH_FLAGS) $(COMMON_WARN_FLAGS) -Ofast -std=gnu99
+APP_CPPFLAGS := \
 	-I$(FW_DIR)/Debug \
 	-I$(FW_DIR)/Core \
 	-I$(FW_DIR)/User \
 	-I$(FW_DIR)/Peripheral/inc \
 	-I$(FW_DIR)/User/USB_Host \
 	-I$(FW_DIR)/User/FATFS
-
-ASFLAGS := -x assembler-with-cpp -march=rv32imacxw -mabi=ilp32 -msmall-data-limit=8 \
-	-msave-restore -fmax-errors=20 -Ofast -fmessage-length=0 -fsigned-char \
-	-ffunction-sections -fdata-sections -fno-common -Wunused -Wuninitialized \
+APP_ASFLAGS := -x assembler-with-cpp $(COMMON_ARCH_FLAGS) $(COMMON_WARN_FLAGS) -Ofast \
 	-I$(FW_DIR)/Startup -I$(FW_DIR)/User
 
-LDFLAGS := -T$(LINKER_SCRIPT) -nostartfiles -Xlinker --gc-sections \
-	-Wl,-Map,$(BUILD_DIR)/$(TARGET).map --specs=nano.specs --specs=nosys.specs
+BL_CFLAGS := $(COMMON_ARCH_FLAGS) $(COMMON_WARN_FLAGS) -Os -std=gnu99
+BL_CPPFLAGS := \
+	-I$(BL_DIR)/Debug \
+	-I$(BL_DIR)/Core \
+	-I$(BL_DIR)/User \
+	-I$(BL_DIR)/User/Host_IAP \
+	-I$(BL_DIR)/Peripheral/inc \
+	-I$(BL_DIR)/User/USB_Host \
+	-I$(BL_DIR)/User/Pff \
+	-I$(BL_DIR)/Startup
+BL_ASFLAGS := -x assembler-with-cpp $(COMMON_ARCH_FLAGS) $(COMMON_WARN_FLAGS) -Os \
+	-I$(BL_DIR)/Startup -I$(BL_DIR)/User
 
-OBJS := $(patsubst $(FW_DIR)/%, $(BUILD_DIR)/%, $(C_SRCS:.c=.o)) \
-	$(patsubst $(FW_DIR)/%, $(BUILD_DIR)/%, $(ASM_SRCS:.S=.o))
+APP_LDFLAGS_COMMON := -nostartfiles -Xlinker --gc-sections --specs=nano.specs --specs=nosys.specs
+BL_LDFLAGS := -T$(BL_LINKER) -nostartfiles -Xlinker --gc-sections \
+	-Wl,-Map,$(BUILD_DIR)/bootloader/Bootloader.map --specs=nano.specs --specs=nosys.specs
 
-DEPS := $(OBJS:.o=.d)
+# Object/dependency paths
+APP_OBJS := $(patsubst $(FW_DIR)/%, $(BUILD_DIR)/app/%, $(APP_C_SRCS:.c=.o)) \
+	$(patsubst $(FW_DIR)/%, $(BUILD_DIR)/app/%, $(APP_ASM_SRCS:.S=.o))
+APP_DEPS := $(APP_OBJS:.o=.d)
 
-ELF := $(BUILD_DIR)/$(TARGET).elf
-BIN := $(BUILD_DIR)/$(TARGET).bin
-HEX := $(BUILD_DIR)/$(TARGET).hex
-LST := $(BUILD_DIR)/$(TARGET).lst
-SIZ := $(BUILD_DIR)/$(TARGET).siz
+BL_OBJS := $(patsubst $(BL_DIR)/%, $(BUILD_DIR)/bootloader/%, $(BL_C_SRCS:.c=.o)) \
+	$(patsubst $(BL_DIR)/%, $(BUILD_DIR)/bootloader/%, $(BL_ASM_SRCS:.S=.o))
+BL_DEPS := $(BL_OBJS:.o=.d)
 
-.PHONY: all clean rebuild check-toolchain check-zx-tools zx-src flash erase
+# Firmware outputs
+APP_BOOT_ELF := $(BUILD_DIR)/app_bootloader/$(APP_TARGET).elf
+APP_BOOT_BIN := $(BUILD_DIR)/$(APP_UPD_NAME)
+APP_BOOT_HEX := $(BUILD_DIR)/app_bootloader/$(APP_TARGET).hex
+APP_BOOT_LST := $(BUILD_DIR)/app_bootloader/$(APP_TARGET).lst
+APP_BOOT_SIZ := $(BUILD_DIR)/app_bootloader/$(APP_TARGET).siz
 
-all: check-toolchain check-zx-tools zx-src $(ELF) $(BIN) $(HEX) $(LST) $(SIZ)
+APP_STANDALONE_ELF := $(BUILD_DIR)/app_standalone/$(APP_TARGET).elf
+APP_STANDALONE_BIN := $(BUILD_DIR)/$(APP_TARGET).bin
+APP_STANDALONE_HEX := $(BUILD_DIR)/$(APP_TARGET).hex
+APP_STANDALONE_LST := $(BUILD_DIR)/$(APP_TARGET).lst
+APP_STANDALONE_SIZ := $(BUILD_DIR)/$(APP_TARGET).siz
 
-$(ELF): $(OBJS)
+# Bootloader outputs
+BL_ELF := $(BUILD_DIR)/bootloader/Bootloader.elf
+BL_BIN := $(BUILD_DIR)/bootloader/Bootloader.bin
+BL_HEX := $(BUILD_DIR)/bootloader/Bootloader.hex
+BL_LST := $(BUILD_DIR)/bootloader/Bootloader.lst
+BL_SIZ := $(BUILD_DIR)/bootloader/Bootloader.siz
+
+# Combined image
+COMBINED_BIN := $(BUILD_DIR)/$(COMBINED_NAME)
+BOOT_OFFSET_BYTES := 16384
+
+.PHONY: all help versions clean rebuild check-toolchain check-zx-tools zx-src \
+	app app-bootloader app-standalone bootloader combine \
+	build-all-versions build-bootloader-version build-normal-version \
+	flash flash-combined flash-standalone flash-bootloader flash-app-upd flash-all-versions \
+	erase
+
+all: check-toolchain check-zx-tools zx-src app bootloader combine
+
+help:
+	@echo "Build targets:"
+	@echo "  make all                     - build all variants + combined image"
+	@echo "  make build-all-versions      - alias for all"
+	@echo "  make bootloader              - bootloader only"
+	@echo "  make app-bootloader          - app linked for bootloader (RISKYZXS.UPD)"
+	@echo "  make app-standalone          - normal app linked at 0x00000000"
+	@echo "  make combine                 - build merged bootloader+app image"
+	@echo "Flash targets:"
+	@echo "  make flash                   - flash combined image"
+	@echo "  make flash-bootloader        - flash bootloader only"
+	@echo "  make flash-app-upd           - flash app update image at 0x00004000"
+	@echo "  make flash-standalone        - flash normal app at 0x00000000"
+	@echo "  make flash-all-versions      - flash combined image (alias)"
+	@echo "Info:"
+	@echo "  make versions                - print artifact paths"
+
+build-all-versions: all
+
+build-bootloader-version: app-bootloader
+
+build-normal-version: app-standalone
+
+versions: app-bootloader app-standalone bootloader combine
+	@echo "Built artifacts:"
+	@echo "  Bootloader:         $(BL_BIN)"
+	@echo "  App update (.UPD):  $(APP_BOOT_BIN)"
+	@echo "  Normal app (.bin):  $(APP_STANDALONE_BIN)"
+	@echo "  Combined image:     $(COMBINED_BIN)"
+
+app: app-bootloader app-standalone
+
+app-bootloader: $(APP_BOOT_ELF) $(APP_BOOT_BIN) $(APP_BOOT_HEX) $(APP_BOOT_LST) $(APP_BOOT_SIZ)
+
+app-standalone: $(APP_STANDALONE_ELF) $(APP_STANDALONE_BIN) $(APP_STANDALONE_HEX) $(APP_STANDALONE_LST) $(APP_STANDALONE_SIZ)
+
+bootloader: $(BL_ELF) $(BL_BIN) $(BL_HEX) $(BL_LST) $(BL_SIZ)
+
+combine: $(COMBINED_BIN)
+
+# Firmware link variants (same objects, different linker scripts)
+$(APP_BOOT_ELF): $(APP_OBJS)
 	@mkdir -p $(dir $@)
-	$(CC) $(CFLAGS) $(LDFLAGS) -o "$@" $(OBJS)
+	$(CC) $(APP_CFLAGS) -T$(APP_LINKER_BOOT) $(APP_LDFLAGS_COMMON) \
+		-Wl,-Map,$(BUILD_DIR)/app_bootloader/$(APP_TARGET).map \
+		-o "$@" $(APP_OBJS)
 
-$(ELF): zx-src
+$(APP_STANDALONE_ELF): $(APP_OBJS)
+	@mkdir -p $(dir $@)
+	$(CC) $(APP_CFLAGS) -T$(APP_LINKER_STANDALONE) $(APP_LDFLAGS_COMMON) \
+		-Wl,-Map,$(BUILD_DIR)/app_standalone/$(APP_TARGET).map \
+		-o "$@" $(APP_OBJS)
 
-$(BIN): $(ELF)
+$(APP_BOOT_BIN): $(APP_BOOT_ELF)
 	$(OBJCOPY) -O binary "$<" "$@"
 
-$(HEX): $(ELF)
+$(APP_BOOT_HEX): $(APP_BOOT_ELF)
 	$(OBJCOPY) -O ihex "$<" "$@"
 
-$(LST): $(ELF)
+$(APP_BOOT_LST): $(APP_BOOT_ELF)
 	$(OBJDUMP) --all-headers --demangle --disassemble -M xw "$<" > "$@"
 
-$(SIZ): $(ELF)
+$(APP_BOOT_SIZ): $(APP_BOOT_ELF)
 	$(SIZE) --format=berkeley "$<" > "$@"
 
+$(APP_STANDALONE_BIN): $(APP_STANDALONE_ELF)
+	$(OBJCOPY) -O binary "$<" "$@"
+
+$(APP_STANDALONE_HEX): $(APP_STANDALONE_ELF)
+	$(OBJCOPY) -O ihex "$<" "$@"
+
+$(APP_STANDALONE_LST): $(APP_STANDALONE_ELF)
+	$(OBJDUMP) --all-headers --demangle --disassemble -M xw "$<" > "$@"
+
+$(APP_STANDALONE_SIZ): $(APP_STANDALONE_ELF)
+	$(SIZE) --format=berkeley "$<" > "$@"
+
+# Bootloader outputs
+$(BL_ELF): $(BL_OBJS)
+	@mkdir -p $(dir $@)
+	$(CC) $(BL_CFLAGS) $(BL_LDFLAGS) -o "$@" $(BL_OBJS)
+
+$(BL_BIN): $(BL_ELF)
+	$(OBJCOPY) -O binary "$<" "$@"
+
+$(BL_HEX): $(BL_ELF)
+	$(OBJCOPY) -O ihex "$<" "$@"
+
+$(BL_LST): $(BL_ELF)
+	$(OBJDUMP) --all-headers --demangle --disassemble -M xw "$<" > "$@"
+
+$(BL_SIZ): $(BL_ELF)
+	$(SIZE) --format=berkeley "$<" > "$@"
+
+# Combined image: pad to 0x4000 then append/update app image at offset.
+$(COMBINED_BIN): $(BL_BIN) $(APP_BOOT_BIN)
+	@mkdir -p $(dir $@)
+	dd if=/dev/zero of="$@" bs=1 count=$(BOOT_OFFSET_BYTES) status=none
+	dd if="$(BL_BIN)" of="$@" conv=notrunc status=none
+	dd if="$(APP_BOOT_BIN)" of="$@" bs=1 seek=$(BOOT_OFFSET_BYTES) conv=notrunc status=none
+	@echo "Created $@ (bootloader @0x00000000, app @0x00004000)"
+
+# ZX ROM generation
 zx-src: $(ZX_OUT_C)
 
 $(ZX_OUT_C): $(ZX_BIN)
@@ -196,14 +324,24 @@ $(ZX_CRT0_REL): $(ZX_CRT0_SRC)
 	@mkdir -p $(dir $@)
 	$(ZX_SDAZ80) -l -o "$@" "$<"
 
-$(BUILD_DIR)/%.o: $(FW_DIR)/%.c
+# Compile rules
+$(BUILD_DIR)/app/%.o: $(FW_DIR)/%.c
 	@mkdir -p $(dir $@)
-	$(CC) $(CFLAGS) $(CPPFLAGS) -Wa,-adhlns="$@.lst" -v \
+	$(CC) $(APP_CFLAGS) $(APP_CPPFLAGS) -Wa,-adhlns="$@.lst" \
 		-MMD -MP -MF"$(@:.o=.d)" -MT"$@" -c -o "$@" "$<"
 
-$(BUILD_DIR)/%.o: $(FW_DIR)/%.S
+$(BUILD_DIR)/app/%.o: $(FW_DIR)/%.S
 	@mkdir -p $(dir $@)
-	$(CC) $(ASFLAGS) -v -MMD -MP -MF"$(@:.o=.d)" -MT"$@" -c -o "$@" "$<"
+	$(CC) $(APP_ASFLAGS) -MMD -MP -MF"$(@:.o=.d)" -MT"$@" -c -o "$@" "$<"
+
+$(BUILD_DIR)/bootloader/%.o: $(BL_DIR)/%.c
+	@mkdir -p $(dir $@)
+	$(CC) $(BL_CFLAGS) $(BL_CPPFLAGS) -Wa,-adhlns="$@.lst" \
+		-MMD -MP -MF"$(@:.o=.d)" -MT"$@" -c -o "$@" "$<"
+
+$(BUILD_DIR)/bootloader/%.o: $(BL_DIR)/%.S
+	@mkdir -p $(dir $@)
+	$(CC) $(BL_ASFLAGS) -MMD -MP -MF"$(@:.o=.d)" -MT"$@" -c -o "$@" "$<"
 
 clean:
 	rm -rf $(BUILD_DIR)
@@ -229,24 +367,61 @@ check-zx-tools:
 	@command -v awk >/dev/null 2>&1 || \
 		( echo "Error: required tool not found: awk"; exit 1 )
 
--include $(DEPS)
+-include $(APP_DEPS)
+-include $(BL_DEPS)
 
-# Ensure generated ZX ROM image sources are refreshed before any CH32 object build.
-$(OBJS): | zx-src
+# Ensure generated ZX ROM source exists before any firmware object build.
+$(APP_OBJS): | zx-src
 
-# Flash the firmware binary to the CH32 via WCH-LinkE and MRS OpenOCD.
-# Requires sudo for USB access.  Build first if the binary is missing.
-flash: $(BIN)
+# Flash combined image (default flash target).
+flash: flash-combined
+
+flash-all-versions: flash-combined
+
+flash-combined: $(COMBINED_BIN)
 	@if [ ! -f "$(OPENOCD)" ]; then \
 		echo "Error: OpenOCD not found at $(OPENOCD)"; \
 		echo "Set MRS_TOOLCHAIN_ROOT, for example:"; \
 		echo "  make flash MRS_TOOLCHAIN_ROOT=/path/to/MRS_Toolchain_Linux_x64_V1.91"; \
 		exit 1; \
 	fi
-	@echo "Flashing $(BIN) ..."
+	@echo "Flashing $(COMBINED_BIN) at 0x00000000 ..."
 	sudo "$(OPENOCD)" \
 		-f "$(OPENOCD_CFG)" \
-		-c "program $(shell pwd)/$(BIN) verify reset exit 0x00000000"
+		-c "program $(shell pwd)/$(COMBINED_BIN) verify reset exit 0x00000000"
+
+# Flash standalone app image at 0x00000000 (no bootloader layout).
+flash-standalone: $(APP_STANDALONE_BIN)
+	@if [ ! -f "$(OPENOCD)" ]; then \
+		echo "Error: OpenOCD not found at $(OPENOCD)"; \
+		exit 1; \
+	fi
+	@echo "Flashing $(APP_STANDALONE_BIN) at 0x00000000 ..."
+	sudo "$(OPENOCD)" \
+		-f "$(OPENOCD_CFG)" \
+		-c "program $(shell pwd)/$(APP_STANDALONE_BIN) verify reset exit 0x00000000"
+
+# Flash bootloader only.
+flash-bootloader: $(BL_BIN)
+	@if [ ! -f "$(OPENOCD)" ]; then \
+		echo "Error: OpenOCD not found at $(OPENOCD)"; \
+		exit 1; \
+	fi
+	@echo "Flashing $(BL_BIN) at 0x00000000 ..."
+	sudo "$(OPENOCD)" \
+		-f "$(OPENOCD_CFG)" \
+		-c "program $(shell pwd)/$(BL_BIN) verify reset exit 0x00000000"
+
+# Flash app update image into app slot (for existing bootloader).
+flash-app-upd: $(APP_BOOT_BIN)
+	@if [ ! -f "$(OPENOCD)" ]; then \
+		echo "Error: OpenOCD not found at $(OPENOCD)"; \
+		exit 1; \
+	fi
+	@echo "Flashing $(APP_BOOT_BIN) at 0x00004000 ..."
+	sudo "$(OPENOCD)" \
+		-f "$(OPENOCD_CFG)" \
+		-c "program $(shell pwd)/$(APP_BOOT_BIN) verify reset exit 0x00004000"
 
 # Erase the entire CH32 flash chip.
 erase:

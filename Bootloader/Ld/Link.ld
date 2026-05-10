@@ -22,16 +22,18 @@ MEMORY
    FLASH-192K + RAM-128K
    FLASH-224K + RAM-96K
    FLASH-256K + RAM-64K  
-	FLASH-288K + RAM-32K
+   FLASH-288K + RAM-32K  
+   FLASH-128K + RAM-192K  
 */
-	FLASH (rx) : ORIGIN = 0x00004000, LENGTH = 192K
-	RAM (xrw) : ORIGIN = 0x20000000, LENGTH = 128K
+	BOOT_FLASH (rx) : ORIGIN = 0x00000000, LENGTH = 16K
+	FLASH (rx) : ORIGIN = 0x00000000, LENGTH = 288K
+	RAM (xrw) : ORIGIN = 0x20000000, LENGTH = 32K
 }
 
 
 SECTIONS
 {
-
+PROVIDE(_flash_limit = ORIGIN(FLASH) + LENGTH(FLASH));
 	.init :
 	{
 		_sinit = .;
@@ -39,13 +41,13 @@ SECTIONS
 		KEEP(*(SORT_NONE(.init)))
 		. = ALIGN(4);
 		_einit = .;
-	} >FLASH AT>FLASH
+	} >BOOT_FLASH AT>BOOT_FLASH
 
   .vector :
   {
       *(.vector);
 	  . = ALIGN(64);
-  } >FLASH AT>FLASH
+	} >BOOT_FLASH AT>BOOT_FLASH
 
 	.text :
 	{
@@ -56,13 +58,13 @@ SECTIONS
 		*(.rodata*)
 		*(.gnu.linkonce.t.*)
 		. = ALIGN(4);
-	} >FLASH AT>FLASH 
+	} >BOOT_FLASH AT>BOOT_FLASH 
 
 	.fini :
 	{
 		KEEP(*(SORT_NONE(.fini)))
 		. = ALIGN(4);
-	} >FLASH AT>FLASH
+	} >BOOT_FLASH AT>BOOT_FLASH
 
 	PROVIDE( _etext = . );
 	PROVIDE( _eitcm = . );	
@@ -72,7 +74,7 @@ SECTIONS
 	  PROVIDE_HIDDEN (__preinit_array_start = .);
 	  KEEP (*(.preinit_array))
 	  PROVIDE_HIDDEN (__preinit_array_end = .);
-	} >FLASH AT>FLASH 
+	} >BOOT_FLASH AT>BOOT_FLASH 
 	
 	.init_array     :
 	{
@@ -80,7 +82,7 @@ SECTIONS
 	  KEEP (*(SORT_BY_INIT_PRIORITY(.init_array.*) SORT_BY_INIT_PRIORITY(.ctors.*)))
 	  KEEP (*(.init_array EXCLUDE_FILE (*crtbegin.o *crtbegin?.o *crtend.o *crtend?.o ) .ctors))
 	  PROVIDE_HIDDEN (__init_array_end = .);
-	} >FLASH AT>FLASH 
+	} >BOOT_FLASH AT>BOOT_FLASH 
 	
 	.fini_array     :
 	{
@@ -88,7 +90,7 @@ SECTIONS
 	  KEEP (*(SORT_BY_INIT_PRIORITY(.fini_array.*) SORT_BY_INIT_PRIORITY(.dtors.*)))
 	  KEEP (*(.fini_array EXCLUDE_FILE (*crtbegin.o *crtbegin?.o *crtend.o *crtend?.o ) .dtors))
 	  PROVIDE_HIDDEN (__fini_array_end = .);
-	} >FLASH AT>FLASH 
+	} >BOOT_FLASH AT>BOOT_FLASH 
 	
 	.ctors          :
 	{
@@ -110,7 +112,7 @@ SECTIONS
 	  KEEP (*(EXCLUDE_FILE (*crtend.o *crtend?.o ) .ctors))
 	  KEEP (*(SORT(.ctors.*)))
 	  KEEP (*(.ctors))
-	} >FLASH AT>FLASH 
+	} >BOOT_FLASH AT>BOOT_FLASH 
 	
 	.dtors          :
 	{
@@ -119,19 +121,22 @@ SECTIONS
 	  KEEP (*(EXCLUDE_FILE (*crtend.o *crtend?.o ) .dtors))
 	  KEEP (*(SORT(.dtors.*)))
 	  KEEP (*(.dtors))
-	} >FLASH AT>FLASH 
+	} >BOOT_FLASH AT>BOOT_FLASH 
+
+	/* End of reserved bootloader region (matches app link base at 0x00004000). */
+	PROVIDE(_bootloader_limit = ORIGIN(BOOT_FLASH) + LENGTH(BOOT_FLASH));
 
 	.dalign :
 	{
 		. = ALIGN(4);
 		PROVIDE(_data_vma = .);
-	} >RAM AT>FLASH	
+	} >RAM AT>BOOT_FLASH	
 
 	.dlalign :
 	{
 		. = ALIGN(4); 
 		PROVIDE(_data_lma = .);
-	} >FLASH AT>FLASH
+	} >BOOT_FLASH AT>BOOT_FLASH
 
 	.data :
 	{
@@ -151,7 +156,7 @@ SECTIONS
     	*(.srodata .srodata.*)
     	. = ALIGN(4);
 		PROVIDE( _edata = .);
-	} >RAM AT>FLASH
+	} >RAM AT>BOOT_FLASH
 
 	.bss :
 	{
@@ -164,7 +169,7 @@ SECTIONS
 		*(COMMON*)
 		. = ALIGN(4);
 		PROVIDE( _ebss = .);
-	} >RAM AT>FLASH
+	} >RAM AT>BOOT_FLASH
 
 	PROVIDE( _end = _ebss);
 	PROVIDE( end = . );

@@ -226,10 +226,12 @@ uint8_t USBFSH_EnableRootHubPort (uint8_t *pspeed) {
  * @return  USB transfer result.
  */
 uint8_t USBFSH_Transact (uint8_t endp_pid, uint8_t endp_tog, uint16_t timeout) {
-    uint8_t r, trans_rerty;
+    uint8_t r, trans_rerty, retry_limit;
     uint16_t i;
 
     USBFSH->HOST_TX_CTRL = USBFSH->HOST_RX_CTRL = endp_tog;
+    /* EP0 during enumeration is often slower to respond right after reset. */
+    retry_limit = ((endp_pid & 0x0F) == 0x00) ? 30 : 10;
     trans_rerty = 0;
     do {
         USBFSH->HOST_EP_PID = endp_pid;       // Specify token PID and endpoint number
@@ -261,13 +263,16 @@ uint8_t USBFSH_Transact (uint8_t endp_pid, uint8_t endp_tog, uint16_t timeout) {
                 switch (endp_pid >> 4) {
                 case USB_PID_SETUP:
                 case USB_PID_OUT:
+                    if (r == 0) {
+                        return ERR_SUCCESS;
+                    }
                     if (r) {
                         return (r | ERR_USB_TRANSFER);
                     }
                     break;
                 case USB_PID_IN:
-                    if ((r == USB_PID_DATA0) && (r == USB_PID_DATA1)) {
-                        ;
+                    if ((r == USB_PID_DATA0) || (r == USB_PID_DATA1)) {
+                        return ERR_SUCCESS;
                     } else if (r) {
                         return (r | ERR_USB_TRANSFER);
                     }
@@ -276,14 +281,14 @@ uint8_t USBFSH_Transact (uint8_t endp_pid, uint8_t endp_tog, uint16_t timeout) {
                     return ERR_USB_UNKNOWN;
                 }
         }
-        Delay_Us (15);
+        Delay_Us (((endp_pid & 0x0F) == 0x00) ? 40 : 15);
         if (USBFSH->INT_FG & USBFS_UIF_DETECT) {
             Delay_Us (200);
             if (USBFSH_CheckRootHubPortEnable() == 0) {
                 return ERR_USB_DISCON;  // USB device disconnect event
             }
         }
-    } while (++trans_rerty < 10);
+    } while (++trans_rerty < retry_limit);
 
     return ERR_USB_TRANSFER;  // Reply timeout
 }
@@ -384,16 +389,47 @@ uint8_t USBFSH_CtrlTransfer (uint8_t ep0_size, uint8_t *pbuf, uint16_t *plen) {
  */
 uint8_t USBFSH_GetDeviceDescr (uint8_t *pep0_size, uint8_t *pbuf) {
     uint8_t s;
+    uint8_t try_cnt;
     uint16_t len;
 
-    *pep0_size = DEFAULT_ENDP0_SIZE;
-    memcpy (pUSBFS_SetupRequest, SetupGetDevDesc, sizeof (USB_SETUP_REQ));
-    s = USBFSH_CtrlTransfer (*pep0_size, pbuf, &len);
+    s = ERR_USB_TRANSFER;
+    /* Stage 1: read first 8 bytes to learn bMaxPacketSize0 reliably. */
+    for (try_cnt = 0; try_cnt < 3; ++try_cnt) {
+        *pep0_size = DEFAULT_ENDP0_SIZE;
+        memcpy (pUSBFS_SetupRequest, SetupGetDevDesc, sizeof (USB_SETUP_REQ));
+        pUSBFS_SetupRequest->wLength = 8;
+        s = USBFSH_CtrlTransfer (*pep0_size, pbuf, &len);
+        if (s == ERR_SUCCESS) {
+            break;
+        }
+        Delay_Ms (5);
+    }
     if (s != ERR_SUCCESS) {
         return s;
     }
+    if (len < 8) {
+        return ERR_USB_BUF_OVER;
+    }
 
     *pep0_size = ((PUSB_DEV_DESCR)pbuf)->bMaxPacketSize0;
+    if ((*pep0_size != 8) && (*pep0_size != 16) && (*pep0_size != 32) && (*pep0_size != 64)) {
+        *pep0_size = DEFAULT_ENDP0_SIZE;
+    }
+
+    /* Stage 2: read full 18-byte device descriptor with discovered EP0 size. */
+    s = ERR_USB_TRANSFER;
+    for (try_cnt = 0; try_cnt < 3; ++try_cnt) {
+        memcpy (pUSBFS_SetupRequest, SetupGetDevDesc, sizeof (USB_SETUP_REQ));
+        pUSBFS_SetupRequest->wLength = ((PUSB_SETUP_REQ)SetupGetDevDesc)->wLength;
+        s = USBFSH_CtrlTransfer (*pep0_size, pbuf, &len);
+        if (s == ERR_SUCCESS) {
+            break;
+        }
+        Delay_Ms (5);
+    }
+    if (s != ERR_SUCCESS) {
+        return s;
+    }
     if (len < ((PUSB_SETUP_REQ)SetupGetDevDesc)->wLength) {
         return ERR_USB_BUF_OVER;
     }
