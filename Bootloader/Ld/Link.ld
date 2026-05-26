@@ -5,35 +5,28 @@ __stack_size = 2048;
 PROVIDE( _stack_size = __stack_size );
 
 
+/* Target chip option byte: SRAM_CODE_MODE = 00
+ *   FLASH = 192K total, RAM = 128K.
+ * Bootloader occupies the first 16K of flash (BOOT_FLASH).
+ * The application is linked at 0x00004000 with the remaining 176K
+ * (see firmware/Ld/Link.ld).
+ *
+ * Reference: CH32FV2x_V3xRM.PDF / Table 32-3, CH32V30x_D8 family
+ * (CH32V303VC/RC).
+ */
 MEMORY
 {
-/* CH32V30x_D8C - CH32V305RB-CH32V305FB
-   CH32V30x_D8 - CH32V303CB-CH32V303RB
-*/
-/*
-	FLASH (rx) : ORIGIN = 0x00000000, LENGTH = 128K
-	RAM (xrw) : ORIGIN = 0x20000000, LENGTH = 32K
-*/
-    
-/* CH32V30x_D8C - CH32V307VC-CH32V307WC-CH32V307RC-CH32V305CC
-   CH32V30x_D8 - CH32V303VC-CH32V303RC
-   FLASH + RAM supports the following configuration
-   For specific choices, please refer :CH32FV2x_V3xRM.PDF\Table 32-3
-   FLASH-192K + RAM-128K
-   FLASH-224K + RAM-96K
-   FLASH-256K + RAM-64K  
-   FLASH-288K + RAM-32K  
-   FLASH-128K + RAM-192K  
-*/
 	BOOT_FLASH (rx) : ORIGIN = 0x00000000, LENGTH = 16K
-	FLASH (rx) : ORIGIN = 0x00000000, LENGTH = 288K
-	RAM (xrw) : ORIGIN = 0x20000000, LENGTH = 32K
+	RAM        (xrw): ORIGIN = 0x20000000, LENGTH = 128K
 }
 
+/* End of total on-chip flash (exclusive). Used by the IAP code in
+ * Bootloader/User/Host_IAP to know the upper bound for app programming.
+ * Must match the FLASH size selected by SRAM_CODE_MODE above. */
+PROVIDE(_flash_limit = 0x00000000 + 192K);
 
 SECTIONS
 {
-PROVIDE(_flash_limit = ORIGIN(FLASH) + LENGTH(FLASH));
 	.init :
 	{
 		_sinit = .;

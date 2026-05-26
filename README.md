@@ -114,9 +114,12 @@ The RISKY Speccy includes a custom **in-application programming (IAP) bootloader
 ### Memory Layout
 
 ```
-Flash Memory (288 KB total):
-  0x00000000 - 0x00003FFF: Bootloader (16 KB, reserved)
-  0x00004000 - 0x0046BFFF: Application (272 KB, max 244 KB usable)
+Flash Memory (192 KB total, SRAM_CODE_MODE=00):
+  0x00000000 - 0x00003FFF: Bootloader  (16 KB, reserved)
+  0x00004000 - 0x0002FFFF: Application (176 KB available)
+
+RAM (128 KB):
+  0x20000000 - 0x2001FFFF
 ```
 
 ### Flashing Options

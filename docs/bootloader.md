@@ -17,19 +17,25 @@ The RISKY Speccy bootloader is a specialized in-application programming (IAP) mo
 ### Bootloader Regions
 
 ```
-FLASH Memory (CH32V30x with 288 KB):
+FLASH Memory (CH32V30x_D8, SRAM_CODE_MODE=00 → 192 KB):
 ┌─────────────────────────┬─────────────────────────────────────────┐
 │ Bootloader              │ Application + IAP Update Slot           │
-│ 0x00000000..0x00003FFF  │ 0x00004000..0x0046BFFF                 │
-│ (16 KB reserved)        │ (272 KB available; ~244 KB typical max) │
+│ 0x00000000..0x00003FFF  │ 0x00004000..0x0002FFFF                  │
+│ (16 KB reserved)        │ (176 KB available)                      │
 └─────────────────────────┴─────────────────────────────────────────┘
 
-RAM Memory (32 KB):
+RAM Memory (128 KB):
 ┌────────────────────────────────────────────────────────────────┐
 │ Stack, data, BSS for bootloader + USB host + FAT subsystems   │
-│ 0x20000000..0x20007FFF                                         │
+│ 0x20000000..0x2001FFFF                                         │
 └────────────────────────────────────────────────────────────────┘
 ```
+
+> **Note:** Total flash and RAM size are governed by `SRAM_CODE_MODE` (USER[7:6]
+> of the option byte at `0x1FFFF802`). The project targets mode `00`
+> (192 KB FLASH + 128 KB RAM). All three linker scripts must agree on this
+> setting — the chip-wide option byte cannot be different for bootloader and
+> application.
 
 ### Bootloader Linker Script
 
@@ -38,22 +44,25 @@ RAM Memory (32 KB):
 Key settings:
 
 - **BOOT_FLASH:** `ORIGIN=0x00000000, LENGTH=16K` — hard boundary on loadable sections
+- **RAM:** `ORIGIN=0x20000000, LENGTH=128K`
 - **All `.text`, `.data` LMA mapped to BOOT_FLASH** — linker enforces overflow error if bootloader > 16 KB
-- **PROVIDE(_bootloader_limit = 0x00004000)** — marks app start boundary
+- **PROVIDE(`_bootloader_limit` = 0x00004000)** — marks app start boundary
+- **PROVIDE(`_flash_limit` = 0x00030000)** — total on-chip flash end, used by IAP for upper-bound checks
 
 ### Application Linker Script (Bootloader-linked variant)
 
 **File:** `firmware/Ld/Link.ld`
 
-- **FLASH:** `ORIGIN=0x00004000, LENGTH=192K` — app linked with 0x4000 base
-- App is exactly 192 KB (0x00004000..0x0046BFFF)
-- Final `.data` LMA = bootloader limit for proper ROM LMA placement
+- **FLASH:** `ORIGIN=0x00004000, LENGTH=176K` — app linked with 0x4000 base, fills the rest of the 192 KB flash
+- **RAM:** `ORIGIN=0x20000000, LENGTH=128K`
+- Final `.data` LMA placed in FLASH for proper ROM image
 
 ### Application Linker Script (Standalone variant)
 
 **File:** `firmware/Ld/Link_standalone.ld`
 
 - **FLASH:** `ORIGIN=0x00000000, LENGTH=192K` — full chip, no bootloader
+- **RAM:** `ORIGIN=0x20000000, LENGTH=128K`
 - Used for development or direct flash without IAP
 
 ---
