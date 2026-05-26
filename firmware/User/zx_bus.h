@@ -40,6 +40,15 @@ void ZX_RomcsRelease (void);
 void ZX_RomcsAssert  (void);
 void ZX_Z80Reset     (void);  /* pulse /RESET LOW then wait 1200ms for zxprog init */
 
+/* Switch the cart engine into Interface 2 pure-ROM mode.
+ * rom_16k must point to a 16 KB image (zero-padded if the original cart was
+ * smaller).  After return the cart ISR serves the full 0x0000..0x3FFF window
+ * from this buffer; the launcher mailbox shadow is disabled.  Call
+ * ZX_Z80Reset() right after to boot the Z80 into the cartridge.  Returning
+ * to launcher mode requires a hardware reset / power cycle.
+ */
+void ZX_BecomeInterface2 (const uint8_t *rom_16k);
+
 /* Send a byte to port 0x7FFD via the PGCMD NMI mailbox.
  * Used to control 128K ROM/RAM paging from the CH32 side.
  * On 48K hardware the Z80 OUT is a no-op; on 128K it selects the ROM

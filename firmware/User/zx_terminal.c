@@ -7,6 +7,7 @@
 #include "z80_loader.h"
 #include "zx_bus.h"
 #include "usb_disk.h"
+#include "if2_cart.h"
 
 #include <ctype.h>
 #include <stdio.h>
@@ -697,6 +698,23 @@ static int ZX_HasTzxExtension (const char *name) {
            (tolower ((unsigned char)name[3]) == 'x');
 }
 
+static int ZX_HasRomExtension (const char *name) {
+    size_t len;
+
+    if (name == NULL) {
+        return 0;
+    }
+    len = strlen (name);
+    if (len < 4u) {
+        return 0;
+    }
+    name += (len - 4u);
+    return (tolower ((unsigned char)name[0]) == '.') &&
+           (tolower ((unsigned char)name[1]) == 'r') &&
+           (tolower ((unsigned char)name[2]) == 'o') &&
+           (tolower ((unsigned char)name[3]) == 'm');
+}
+
 static int ZX_IsEnterKey (uint8_t key) {
     return (key == '\n') || (key == '\r');
 }
@@ -766,7 +784,8 @@ static int ZX_BrowserLoadFiles (const char *path) {
             } else {
                 if (!ZX_HasZ80Extension ((const char *)fno.fname) &&
                     !ZX_HasTapExtension ((const char *)fno.fname) &&
-                    !ZX_HasTzxExtension ((const char *)fno.fname)) {
+                    !ZX_HasTzxExtension ((const char *)fno.fname) &&
+                    !ZX_HasRomExtension ((const char *)fno.fname)) {
                     continue;
                 }
             }
@@ -971,6 +990,59 @@ static int ZX_BrowserShowTapReady (const char *path) {
     ZX_TermModelWriteAt (11u, 0u, "ANY KEY LOAD BASIC 0 CANCEL", red_attr);
 
 
+    return ZX_TermCommit();
+}
+
+static int ZX_BrowserShowRomInfo (const char *path, uint32_t size) {
+    uint8_t normal_attr = (uint8_t)((7u << 3) | 0u);
+    uint8_t title_attr  = (uint8_t)((1u << 3) | 7u);
+    uint8_t warn_attr   = (uint8_t)((6u << 3) | 0u);
+    char line[ZX_TERM_COLS + 1u];
+
+    ZX_TermModelClear();
+    ZX_TermModelWriteAt (0u, 0u, "RISKY SPECCY", normal_attr);
+    ZX_TermModelWriteAt (0u, 14u, FIRMWARE_VERSION_STRING, normal_attr);
+    ZX_TermModelWriteAt (2u, 0u, "INTERFACE 2 CARTRIDGE", title_attr);
+
+    ZX_TermModelWriteAt (4u, 0u, (path != NULL) ? path : "(unknown)", normal_attr);
+
+    memset (line, ' ', sizeof (line));
+    line[ZX_TERM_COLS] = '\0';
+    (void)snprintf (line, sizeof (line), "SIZE:    %lu BYTES", (unsigned long)size);
+    ZX_TermModelWriteAt (6u, 0u, line, normal_attr);
+
+    memset (line, ' ', sizeof (line));
+    line[ZX_TERM_COLS] = '\0';
+    (void)snprintf (line, sizeof (line), "MAPPED:  0000-3FFF (16K)");
+    ZX_TermModelWriteAt (7u, 0u, line, normal_attr);
+
+    if (size == 0u) {
+        ZX_TermModelWriteAt (10u, 0u, "WARNING: EMPTY FILE", warn_attr);
+        ZX_TermModelWriteAt (11u, 0u, "LOAD WILL FAIL", warn_attr);
+    } else if (size > 0x4000u) {
+        ZX_TermModelWriteAt (10u, 0u, "WARNING: > 16K, WILL TRUNCATE", warn_attr);
+    } else if (size < 0x4000u) {
+        ZX_TermModelWriteAt (10u, 0u, "NOTE: PADDED TO 16K (0xFF)", normal_attr);
+    }
+
+    ZX_TermModelWriteAt (14u, 0u, "AFTER LOAD: PURE-ROM MODE", normal_attr);
+    ZX_TermModelWriteAt (15u, 0u, "USE HW RESET TO EXIT", normal_attr);
+
+    ZX_TermModelWriteAt (22u, 0u, "ENTER LOAD  0 CANCEL", normal_attr);
+
+    return ZX_TermCommit();
+}
+
+static int ZX_BrowserShowRomLoading (const char *path) {
+    uint8_t normal_attr = (uint8_t)((7u << 3) | 0u);
+    uint8_t alert_attr  = (uint8_t)((1u << 3) | 7u);
+
+    ZX_TermModelClear();
+    ZX_TermModelWriteAt (0u, 0u, "RISKY SPECCY", normal_attr);
+    ZX_TermModelWriteAt (0u, 14u, FIRMWARE_VERSION_STRING, normal_attr);
+    ZX_TermModelWriteAt (2u, 0u, "LOADING CARTRIDGE...", alert_attr);
+    ZX_TermModelWriteAt (4u, 0u, (path != NULL) ? path : "(unknown)", normal_attr);
+    ZX_TermModelWriteAt (10u, 0u, "PLEASE WAIT", normal_attr);
     return ZX_TermCommit();
 }
 
@@ -1484,6 +1556,70 @@ int ZX_TerminalCommandZ80Select (const char *path) {
             if (!ZX_BrowserBuildPath (full_path, sizeof (full_path), cur_path, s_browser_files[selected])) {
                 printf ("z80select: path too long, cannot open\r\n");
                 continue;
+            }
+            if (ZX_HasRomExtension (s_browser_files[selected])) {
+                /* Interface 2 cartridge ROM: show info page, wait for ENTER to
+                   confirm or 0 (any non-ENTER key) to cancel back to the
+                   browser.  On confirm: show a brief LOADING page and switch
+                   the cart engine into pure-ROM mode.  Board then acts as a
+                   16 KB ROM cart until hardware reset. */
+                FILINFO rfi;
+                uint32_t rsize = 0u;
+                int rconfirmed = 0;
+
+                if (f_stat (full_path, &rfi) == FR_OK) {
+                    rsize = (uint32_t)rfi.fsize;
+                }
+
+                if (!ZX_BrowserShowRomInfo (full_path, rsize)) {
+                    printf ("WARN: rom info draw timeout\r\n");
+                }
+                for (;;) {
+                    uint8_t ikey = 0u;
+                    int krc = ZX_KeyPoll (&ikey);
+                    if (krc < 0) { break; }
+                    if (krc > 0) {
+                        if (ZX_IsEnterKey (ikey)) { rconfirmed = 1; }
+                        break;
+                    }
+                    Delay_Ms (20u);
+                }
+                if (!rconfirmed) {
+                    if (!ZX_BrowserRenderRetry (cur_path, selected)) {
+                        printf ("WARN: z80select redraw timeout\r\n");
+                    }
+                    suppress_enter_loops = 20u;
+                    continue;
+                }
+
+                /* Show LOADING page (still in launcher mode — cart shadow RAM
+                   at 0x3000+ is what backs the ZX display).  Then drop the
+                   draw suspension and run the actual swap. */
+                if (!ZX_BrowserShowRomLoading (full_path)) {
+                    printf ("WARN: rom loading draw timeout\r\n");
+                }
+
+                s_selector_font_mode = 0u;
+                if (draw_suspended) {
+                    ZX_TerminalMarkBridgeDirty();
+                    ZX_CartDrawResume();
+                    draw_suspended = 0;
+                }
+                if (!IF2_LoadRomFromFile (full_path)) {
+                    printf ("z80select: if2 load failed for %s\r\n", full_path);
+                    /* Re-suspend draw and redraw the browser so the user can retry. */
+                    s_selector_font_mode = 1u;
+                    ZX_CartDrawSuspend();
+                    Delay_Ms (50u);
+                    draw_suspended = 1;
+                    if (!ZX_BrowserRenderRetry (cur_path, selected)) {
+                        printf ("WARN: z80select redraw timeout\r\n");
+                    }
+                    suppress_enter_loops = 20u;
+                    continue;
+                }
+                launched = 1;
+                goto done;
             }
             if (ZX_HasTapExtension (s_browser_files[selected]) ||
                 ZX_HasTzxExtension (s_browser_files[selected])) {

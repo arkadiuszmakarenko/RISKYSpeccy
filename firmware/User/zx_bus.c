@@ -80,6 +80,11 @@ struct ZXCartState {
        _zx_launcher so the handover fires exactly when the Z80 jumps from
        cart space into game space. */
     volatile uint16_t handover_addr;
+    /* ROM image served on reads from addresses [0 .. RamBase-1].
+       Defaults to the embedded zxprog launcher (g_zx_image, 12 K).
+       Repointed to a 16 K buffer when an Interface 2 cartridge ROM is loaded
+       (see ZX_BecomeInterface2).  Read-only as far as the ISR is concerned. */
+    const uint8_t *rom_image;
     volatile uint8_t ram[0x1000];
 };
 
@@ -357,6 +362,7 @@ void Init_Cart() {
     state_pointer->PinMREQ = GPIO_Pin_10;
     state_pointer->IRQLine = EXTI_Line10;
     state_pointer->handover_addr = 0xFFFFu;
+    state_pointer->rom_image = g_zx_image;
 
     gpio.GPIO_Pin = ZX_PIN_BUSACK | ZX_PIN_CK_INV;
     gpio.GPIO_Mode = GPIO_Mode_IN_FLOATING;
@@ -393,7 +399,7 @@ void RunCartWithRAM (void) {
      if ((GPIOB->INDR & sp->PinRD) == 0u) { // Check for RD active (active low)
         if (address < sp->RamBase) {
             GPIOD->CFGLR = sp->BusOn;
-            GPIOD->OUTDR = (GPIOD->OUTDR & ~sp->DataMask) | g_zx_image[address];
+            GPIOD->OUTDR = (GPIOD->OUTDR & ~sp->DataMask) | sp->rom_image[address];
             while ((GPIOB->INDR & sp->PinRD) == 0u) { }
             GPIOD->CFGLR = sp->BusOff;
         } else if (address <= sp->RomLast) {
@@ -488,6 +494,40 @@ void ZX_RomcsAssert (void) {
     GPIO_Init (GPIOB, &gpio);
     GPIO_SetBits (GPIOB, ZX_PIN_ROMCS);
     /* Re-arm the EXTI vector and unmask the line so the cart ISR runs again. */
+    SetVTFIRQ ((u32)RunCartWithRAM, EXTI15_10_IRQn, 0, ENABLE);
+    EXTI->INTFR = EXTI_Line10;
+    EXTI->INTENR |= EXTI_Line10;
+    NVIC_EnableIRQ (EXTI15_10_IRQn);
+}
+
+/* Switch the cart engine into "Interface 2" pure-ROM mode.
+   The full 0x0000..0x3FFF window is served from rom_16k; the launcher's
+   mailbox shadow at 0x3000..0x3FFF is disabled, and the ROMCS handover is
+   suppressed so the ZX never sees its internal ROM until a hardware reset.
+   Caller is expected to pulse /RESET (ZX_Z80Reset) afterwards so the Z80
+   boots into the cartridge image. */
+void ZX_BecomeInterface2 (const uint8_t *rom_16k) {
+    if ((state_pointer == NULL) || (rom_16k == NULL)) {
+        return;
+    }
+    /* Mutate state with the cart ISR masked so a half-updated config can
+       never be observed by a Z80 bus cycle. */
+    NVIC_DisableIRQ (EXTI15_10_IRQn);
+    state_pointer->rom_image    = rom_16k;
+    state_pointer->RamBase      = 0x4000u;   /* whole 16 K is ROM */
+    state_pointer->RomLast      = 0x3FFFu;   /* RAM branch never fires (Base > Last) */
+    state_pointer->handover_addr = 0xFFFFu;  /* no handover */
+    /* Make sure ROMCS is driven push-pull HIGH (may have been tristated by
+       a previous launch). */
+    {
+        GPIO_InitTypeDef gpio = {0};
+        gpio.GPIO_Pin  = ZX_PIN_ROMCS;
+        gpio.GPIO_Mode = GPIO_Mode_Out_PP;
+        gpio.GPIO_Speed = GPIO_Speed_50MHz;
+        GPIO_Init (GPIOB, &gpio);
+        GPIO_SetBits (GPIOB, ZX_PIN_ROMCS);
+    }
+    /* Re-arm and re-enable the cart ISR. */
     SetVTFIRQ ((u32)RunCartWithRAM, EXTI15_10_IRQn, 0, ENABLE);
     EXTI->INTFR = EXTI_Line10;
     EXTI->INTENR |= EXTI_Line10;
