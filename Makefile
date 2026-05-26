@@ -13,6 +13,13 @@ MRS_TOOLCHAIN_ROOT ?= /usr/share/MRS2/MRS-linux-x64/resources/app/resources/linu
 OPENOCD          := $(MRS_TOOLCHAIN_ROOT)/OpenOCD/bin/openocd
 OPENOCD_CFG      := $(MRS_TOOLCHAIN_ROOT)/OpenOCD/bin/wch-riscv.cfg
 
+# minichlink (ch32v003fun) - WCH-LinkE programmer.
+# On CH32V30x the program flash is mapped at 0x08000000 (alias of 0x00000000
+# for code fetches); minichlink expects addresses in that window.
+MINICHLINK       ?= minichlink
+MC_FLASH_BASE    := 0x08000000
+MC_APP_OFFSET     = $(shell printf '0x%08x' $$(( $(MC_FLASH_BASE) + $(BOOT_OFFSET_BYTES) )))
+
 CC      := $(TOOLCHAIN_BIN)/$(TOOL_PREFIX)gcc
 OBJCOPY := $(TOOLCHAIN_BIN)/$(TOOL_PREFIX)objcopy
 OBJDUMP := $(TOOLCHAIN_BIN)/$(TOOL_PREFIX)objdump
@@ -72,6 +79,7 @@ APP_C_SRCS := \
 	$(FW_DIR)/Peripheral/src/ch32v30x_wwdg.c \
 	$(FW_DIR)/User/ch32v30x_it.c \
 	$(FW_DIR)/User/gpio.c \
+	$(FW_DIR)/User/if2_cart.c \
 	$(FW_DIR)/User/main.c \
 	$(FW_DIR)/User/reset_button.c \
 	$(FW_DIR)/User/system_ch32v30x.c \
@@ -170,27 +178,69 @@ BOOT_OFFSET_BYTES := 16384
 .PHONY: all help versions clean rebuild check-toolchain check-zx-tools zx-src \
 	app app-bootloader app-standalone bootloader combine \
 	build-all-versions build-bootloader-version build-normal-version \
-	flash flash-combined flash-standalone flash-bootloader flash-app-upd flash-all-versions \
-	erase
+	flash flash-combined flash-combined-unlock flash-standalone flash-standalone-unlock flash-bootloader flash-app-upd flash-all-versions \
+	erase \
+	check-minichlink mc-info \
+	flash-minichlink flash-combined-minichlink flash-bootloader-minichlink \
+	flash-app-upd-minichlink flash-standalone-minichlink \
+	erase-minichlink unbrick unprotect-minichlink protect-minichlink \
+	halt halt-reboot resume reboot
 
 all: check-toolchain check-zx-tools zx-src app bootloader combine
 
 help:
 	@echo "Build targets:"
-	@echo "  make all                     - build all variants + combined image"
+	@echo "  make all                     - build all variants + combined image (default)"
 	@echo "  make build-all-versions      - alias for all"
-	@echo "  make bootloader              - bootloader only"
-	@echo "  make app-bootloader          - app linked for bootloader (RISKYZXS.UPD)"
-	@echo "  make app-standalone          - normal app linked at 0x00000000"
-	@echo "  make combine                 - build merged bootloader+app image"
+	@echo "  make bootloader              - bootloader only (build/bootloader/Bootloader.bin)"
+	@echo "  make app                     - both app variants (bootloader-linked + standalone)"
+	@echo "  make app-bootloader          - app linked at 0x00004000 -> build/RISKYZXS.UPD"
+	@echo "  make build-bootloader-version  - alias for app-bootloader"
+	@echo "  make app-standalone          - app linked at 0x00000000 -> build/RISKYSpeccy.bin"
+	@echo "  make build-normal-version    - alias for app-standalone"
+	@echo "  make combine                 - merged bootloader+app -> build/RISKYZXS_COMBINED.bin"
+	@echo "  make zx-src                  - regenerate ZX ROM source (firmware/User/zx_image.c)"
 	@echo "Flash targets:"
-	@echo "  make flash                   - flash combined image"
-	@echo "  make flash-bootloader        - flash bootloader only"
-	@echo "  make flash-app-upd           - flash app update image at 0x00004000"
-	@echo "  make flash-standalone        - flash normal app at 0x00000000"
+	@echo "  make flash                   - flash combined image (alias for flash-combined)"
 	@echo "  make flash-all-versions      - flash combined image (alias)"
+	@echo "  make flash-combined          - flash combined image at 0x00000000"
+	@echo "  make flash-combined-unlock   - unprotect (clear RDP) + flash combined image"
+	@echo "  make flash-bootloader        - flash bootloader only at 0x00000000"
+	@echo "  make flash-app-upd           - flash app update image at 0x00004000"
+	@echo "  make flash-standalone        - flash standalone app at 0x00000000"
+	@echo "  make flash-standalone-unlock - unprotect (clear RDP) + flash standalone app"
+	@echo "  make erase                   - erase entire on-chip flash via OpenOCD"
+	@echo "Flash targets (minichlink / WCH-LinkE):"
+	@echo "  make flash-minichlink          - flash combined image (alias for flash-combined-minichlink)"
+	@echo "  make flash-combined-minichlink - flash combined image at 0x08000000"
+	@echo "  make flash-bootloader-minichlink - flash bootloader only at 0x08000000"
+	@echo "  make flash-app-upd-minichlink  - flash app update image at 0x08004000"
+	@echo "  make flash-standalone-minichlink - flash standalone app at 0x08000000"
+	@echo "  make erase-minichlink          - erase chip (minichlink -E)"
+	@echo "  make unbrick                   - power-cycle erase to recover a locked chip (minichlink -u)"
+	@echo "  make unprotect-minichlink      - disable read protection (minichlink -p)"
+	@echo "  make protect-minichlink        - enable read protection (minichlink -P)"
+	@echo "  make mc-info                   - show chip info / option bytes (minichlink -i)"
+	@echo "Debug control (minichlink):"
+	@echo "  make halt                      - halt CPU without reset (minichlink -A)"
+	@echo "  make halt-reboot               - reset + halt at entry point (minichlink -a)"
+	@echo "  make resume                    - resume execution from halt (minichlink -e)"
+	@echo "  make reboot                    - reboot out of halt (minichlink -b)"
+	@echo "Maintenance:"
+	@echo "  make clean                   - remove the build/ directory"
+	@echo "  make rebuild                 - clean + all"
+	@echo "  make check-toolchain         - verify riscv-wch-elf-gcc is available"
+	@echo "  make check-zx-tools          - verify sdcc/sdasz80/objcopy/od/awk are available"
+	@echo "  make check-minichlink        - verify minichlink is available"
 	@echo "Info:"
-	@echo "  make versions                - print artifact paths"
+	@echo "  make help                    - show this message"
+	@echo "  make versions                - build artifacts and print their paths"
+	@echo "Overridable variables:"
+	@echo "  TOOLCHAIN_DIR=<path>         - RISC-V GCC root (default: $(TOOLCHAIN_DIR))"
+	@echo "  MRS_TOOLCHAIN_ROOT=<path>    - MounRiver OpenOCD root (default: $(MRS_TOOLCHAIN_ROOT))"
+	@echo "  MINICHLINK=<path>            - minichlink binary (default: $(MINICHLINK))"
+	@echo "  BUILD_DIR=<path>             - output directory (default: $(BUILD_DIR))"
+	@echo "  ZX_SDCC / ZX_SDAZ80 / ZX_OBJCOPY - ZX cross-tools (defaults: sdcc/sdasz80/objcopy)"
 
 build-all-versions: all
 
@@ -388,7 +438,22 @@ flash-combined: $(COMBINED_BIN)
 	@echo "Flashing $(COMBINED_BIN) at 0x00000000 ..."
 	sudo "$(OPENOCD)" \
 		-f "$(OPENOCD_CFG)" \
-		-c "program $(shell pwd)/$(COMBINED_BIN) verify reset exit 0x00000000"
+		-c "program $(shell pwd)/$(COMBINED_BIN) verify reset exit 0x00000000" || \
+		( echo "Hint: if OpenOCD reports read-protect enabled, run: make flash-combined-unlock"; exit 1 )
+
+# Unprotect (RDP clear), then flash combined image.
+# NOTE: This operation may erase flash before programming.
+flash-combined-unlock: $(COMBINED_BIN)
+	@if [ ! -f "$(OPENOCD)" ]; then \
+		echo "Error: OpenOCD not found at $(OPENOCD)"; \
+		echo "Set MRS_TOOLCHAIN_ROOT, for example:"; \
+		echo "  make flash-combined-unlock MRS_TOOLCHAIN_ROOT=/path/to/MRS_Toolchain_Linux_x64_V1.91"; \
+		exit 1; \
+	fi
+	@echo "Unprotecting + flashing $(COMBINED_BIN) at 0x00000000 ..."
+	sudo "$(OPENOCD)" \
+		-f "$(OPENOCD_CFG)" \
+		-c "init; halt; flash write_image erase unlock $(shell pwd)/$(COMBINED_BIN) 0x00000000 bin; verify_image $(shell pwd)/$(COMBINED_BIN) 0x00000000 bin; reset run; shutdown"
 
 # Flash standalone app image at 0x00000000 (no bootloader layout).
 flash-standalone: $(APP_STANDALONE_BIN)
@@ -399,7 +464,22 @@ flash-standalone: $(APP_STANDALONE_BIN)
 	@echo "Flashing $(APP_STANDALONE_BIN) at 0x00000000 ..."
 	sudo "$(OPENOCD)" \
 		-f "$(OPENOCD_CFG)" \
-		-c "program $(shell pwd)/$(APP_STANDALONE_BIN) verify reset exit 0x00000000"
+		-c "program $(shell pwd)/$(APP_STANDALONE_BIN) verify reset exit 0x00000000" || \
+		( echo "Hint: if OpenOCD reports read-protect enabled, run: make flash-standalone-unlock"; exit 1 )
+
+# Unprotect (RDP clear), then flash standalone app image.
+# NOTE: This operation may erase flash before programming.
+flash-standalone-unlock: $(APP_STANDALONE_BIN)
+	@if [ ! -f "$(OPENOCD)" ]; then \
+		echo "Error: OpenOCD not found at $(OPENOCD)"; \
+		echo "Set MRS_TOOLCHAIN_ROOT, for example:"; \
+		echo "  make flash-standalone-unlock MRS_TOOLCHAIN_ROOT=/path/to/MRS_Toolchain_Linux_x64_V1.91"; \
+		exit 1; \
+	fi
+	@echo "Unprotecting + flashing $(APP_STANDALONE_BIN) at 0x00000000 ..."
+	sudo "$(OPENOCD)" \
+		-f "$(OPENOCD_CFG)" \
+		-c "init; halt; flash write_image erase unlock $(shell pwd)/$(APP_STANDALONE_BIN) 0x00000000 bin; verify_image $(shell pwd)/$(APP_STANDALONE_BIN) 0x00000000 bin; reset run; shutdown"
 
 # Flash bootloader only.
 flash-bootloader: $(BL_BIN)
@@ -435,3 +515,84 @@ erase:
 	sudo "$(OPENOCD)" \
 		-f "$(OPENOCD_CFG)" \
 		-c "init; halt; flash erase_sector wch_riscv 0 last; exit"
+
+# ----------------------------------------------------------------------------
+# minichlink (ch32v003fun) targets — alternative programmer path via WCH-LinkE.
+#
+# Override the binary location with: make MINICHLINK=/path/to/minichlink ...
+# All program/erase/unbrick targets require the WCH-LinkE to be plugged in and
+# the target board powered (or powered by the LinkE via the -3 / -5 args).
+# ----------------------------------------------------------------------------
+
+check-minichlink:
+	@command -v "$(MINICHLINK)" >/dev/null 2>&1 || \
+		( echo "Error: minichlink not found ($(MINICHLINK))"; \
+		  echo "Install from https://github.com/cnlohr/ch32v003fun or set MINICHLINK=/path/to/minichlink"; \
+		  exit 1 )
+
+# Show chip info / read option bytes.
+mc-info: check-minichlink
+	"$(MINICHLINK)" -i
+
+# Flash combined image (bootloader + app) at flash base.
+flash-minichlink: flash-combined-minichlink
+
+flash-combined-minichlink: check-minichlink $(COMBINED_BIN)
+	@echo "Flashing $(COMBINED_BIN) at $(MC_FLASH_BASE) via minichlink ..."
+	"$(MINICHLINK)" -w "$(COMBINED_BIN)" $(MC_FLASH_BASE) -b
+
+# Flash bootloader only.
+flash-bootloader-minichlink: check-minichlink $(BL_BIN)
+	@echo "Flashing $(BL_BIN) at $(MC_FLASH_BASE) via minichlink ..."
+	"$(MINICHLINK)" -w "$(BL_BIN)" $(MC_FLASH_BASE) -b
+
+# Flash app update image at app slot (assumes bootloader already present).
+flash-app-upd-minichlink: check-minichlink $(APP_BOOT_BIN)
+	@echo "Flashing $(APP_BOOT_BIN) at $(MC_APP_OFFSET) via minichlink ..."
+	"$(MINICHLINK)" -w "$(APP_BOOT_BIN)" $(MC_APP_OFFSET) -b
+
+# Flash standalone app at flash base.
+flash-standalone-minichlink: check-minichlink $(APP_STANDALONE_BIN)
+	@echo "Flashing $(APP_STANDALONE_BIN) at $(MC_FLASH_BASE) via minichlink ..."
+	"$(MINICHLINK)" -w "$(APP_STANDALONE_BIN)" $(MC_FLASH_BASE) -b
+
+# Erase entire chip via minichlink (-E).
+erase-minichlink: check-minichlink
+	@echo "Erasing chip via minichlink ..."
+	"$(MINICHLINK)" -E -b
+
+# Disable read protection (RDP). May erase flash as a side effect.
+unprotect-minichlink: check-minichlink
+	@echo "Disabling read protection via minichlink ..."
+	"$(MINICHLINK)" -p -b
+
+# Enable read protection (RDP).
+protect-minichlink: check-minichlink
+	@echo "Enabling read protection via minichlink ..."
+	"$(MINICHLINK)" -P -b
+
+# Unbrick: power-cycle erase that recovers a chip locked or stuck in a bad state.
+# Uses minichlink -u (clears all code flash by power-off cycling the LinkE rail).
+unbrick: check-minichlink
+	@echo "Unbricking chip via minichlink (-u) ..."
+	"$(MINICHLINK)" -u
+
+# Halt the CPU without resetting (minichlink -A).
+halt: check-minichlink
+	@echo "Halting CPU via minichlink (-A) ..."
+	"$(MINICHLINK)" -A
+
+# Reset the CPU and halt at the entry point (minichlink -a).
+halt-reboot: check-minichlink
+	@echo "Resetting + halting CPU via minichlink (-a) ..."
+	"$(MINICHLINK)" -a
+
+# Resume execution from halt (minichlink -e).
+resume: check-minichlink
+	@echo "Resuming CPU via minichlink (-e) ..."
+	"$(MINICHLINK)" -e
+
+# Reboot out of halt (minichlink -b).
+reboot: check-minichlink
+	@echo "Rebooting CPU via minichlink (-b) ..."
+	"$(MINICHLINK)" -b
