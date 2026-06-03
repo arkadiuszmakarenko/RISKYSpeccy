@@ -417,6 +417,8 @@ void RunCartWithRAM (void) {
                    CNF=01 (floating input), MODE=00.  One write; no RMW hazard
                    since the Z80 RD has already been released above. */
                 GPIOB->CFGLR = (GPIOB->CFGLR & ~(0xFu << 12)) | (0x4u << 12);
+                GPIOB->CFGHR = (GPIOB->CFGHR & ~((0xFu << 24) | (0xFu << 28)))
+                 |  ((0x4u << 24) | (0x4u << 28));
                 EXTI->INTENR &= ~sp->IRQLine;
                 NVIC_DisableIRQ (EXTI15_10_IRQn);
             }
@@ -470,6 +472,7 @@ void RunCartWithRAM (void) {
 #define ZX_LAUNCH_TIMEOUT_MS    3000u
 
 void ZX_RomcsRelease (void) {
+    GPIO_ResetBits (GPIOB, ZX_PIN_ROMCS | GPIO_Pin_14 | GPIO_Pin_15);
     /* Emergency / abort tristate: switch ROMCS to input-floating and stop
        the cart ISR.  Normal launch uses the automatic handover in the ISR. */
     if (state_pointer != NULL) {
@@ -477,8 +480,13 @@ void ZX_RomcsRelease (void) {
     }
     NVIC_DisableIRQ (EXTI15_10_IRQn);
     EXTI->INTENR &= ~EXTI_Line10;
-    /* ROMCS (PB3) → input-floating */
+    /* ROMCS (PB3) → input-floating: CFGLR bits [15:12], CNF=01 MODE=00. */
     GPIOB->CFGLR = (GPIOB->CFGLR & ~(0xFu << 12)) | (0x4u << 12);
+    /* External-bus OE drivers (PB14, PB15) → input-floating, otherwise the
+       cart keeps fighting the ZX ULA for the bus even after ROMCS is gone.
+       CFGHR bits [27:24] = PB14, [31:28] = PB15.  CNF=01 MODE=00 each. */
+    GPIOB->CFGHR = (GPIOB->CFGHR & ~((0xFu << 24) | (0xFu << 28)))
+                 |  ((0x4u << 24) | (0x4u << 28));
 }
 
 void ZX_RomcsAssert (void) {
@@ -487,12 +495,14 @@ void ZX_RomcsAssert (void) {
     ZX_AddrBusInput();
     ZX_DataBusInput();
     ZX_CtrlLinesInput();
-    /* Re-drive ROMCS as push-pull HIGH (cart ROM selected). */
-    gpio.GPIO_Pin = ZX_PIN_ROMCS;
+    /* Re-drive ROMCS (PB3) and the external-bus OE buffers (PB14, PB15)
+       as push-pull HIGH so the cart wins the bus again — mirrors the
+       tristate done in ZX_RomcsRelease. */
+    gpio.GPIO_Pin = ZX_PIN_ROMCS | GPIO_Pin_14 | GPIO_Pin_15;
     gpio.GPIO_Mode = GPIO_Mode_Out_PP;
     gpio.GPIO_Speed = GPIO_Speed_50MHz;
     GPIO_Init (GPIOB, &gpio);
-    GPIO_SetBits (GPIOB, ZX_PIN_ROMCS);
+    GPIO_SetBits (GPIOB, ZX_PIN_ROMCS | GPIO_Pin_14 | GPIO_Pin_15);
     /* Re-arm the EXTI vector and unmask the line so the cart ISR runs again. */
     SetVTFIRQ ((u32)RunCartWithRAM, EXTI15_10_IRQn, 0, ENABLE);
     EXTI->INTFR = EXTI_Line10;
@@ -520,12 +530,12 @@ void ZX_BecomeInterface2 (const uint8_t *rom_16k) {
     /* Make sure ROMCS is driven push-pull HIGH (may have been tristated by
        a previous launch). */
     {
-        GPIO_InitTypeDef gpio = {0};
-        gpio.GPIO_Pin  = ZX_PIN_ROMCS;
-        gpio.GPIO_Mode = GPIO_Mode_Out_PP;
-        gpio.GPIO_Speed = GPIO_Speed_50MHz;
-        GPIO_Init (GPIOB, &gpio);
-        GPIO_SetBits (GPIOB, ZX_PIN_ROMCS);
+    GPIO_InitTypeDef gpio = {0};
+    gpio.GPIO_Pin = ZX_PIN_ROMCS | GPIO_Pin_14 | GPIO_Pin_15;
+    gpio.GPIO_Mode = GPIO_Mode_Out_PP;
+    gpio.GPIO_Speed = GPIO_Speed_50MHz;
+    GPIO_Init (GPIOB, &gpio);
+    GPIO_SetBits (GPIOB, ZX_PIN_ROMCS | GPIO_Pin_14 | GPIO_Pin_15);
     }
     /* Re-arm and re-enable the cart ISR. */
     SetVTFIRQ ((u32)RunCartWithRAM, EXTI15_10_IRQn, 0, ENABLE);

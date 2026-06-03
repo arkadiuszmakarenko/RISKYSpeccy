@@ -20,6 +20,21 @@ int main (void) {
     GPIO_Config();
     USB_Initialization();
     Init_Cart();
+
+    GPIO_InitTypeDef gpio = {0};
+    /* Re-drive ROMCS as push-pull HIGH (cart ROM selected). */
+    gpio.GPIO_Pin = GPIO_Pin_14;
+    gpio.GPIO_Mode = GPIO_Mode_Out_PP;
+    gpio.GPIO_Speed = GPIO_Speed_50MHz;
+    GPIO_Init (GPIOB, &gpio);
+    GPIO_SetBits (GPIOB, GPIO_Pin_14);
+        /* Re-drive ROMCS as push-pull HIGH (cart ROM selected). */
+    gpio.GPIO_Pin = GPIO_Pin_15;
+    gpio.GPIO_Mode = GPIO_Mode_Out_PP;
+    gpio.GPIO_Speed = GPIO_Speed_50MHz;
+    GPIO_Init (GPIOB, &gpio);
+    GPIO_SetBits (GPIOB, GPIO_Pin_15);
+
     ZX_Z80Reset();
 
     /* Mount USB MSC filesystem (lazy: actual init runs on first f_open). */
