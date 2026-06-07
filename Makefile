@@ -184,7 +184,8 @@ BOOT_OFFSET_BYTES := 16384
 	flash-minichlink flash-combined-minichlink flash-bootloader-minichlink \
 	flash-app-upd-minichlink flash-standalone-minichlink \
 	erase-minichlink unbrick unprotect-minichlink protect-minichlink \
-	halt halt-reboot resume reboot
+	halt halt-reboot resume reboot \
+	split-info split-set split-set-openocd split-set-minichlink
 
 all: check-toolchain check-zx-tools zx-src app bootloader combine
 
@@ -226,6 +227,19 @@ help:
 	@echo "  make halt-reboot               - reset + halt at entry point (minichlink -a)"
 	@echo "  make resume                    - resume execution from halt (minichlink -e)"
 	@echo "  make reboot                    - reboot out of halt (minichlink -b)"
+	@echo "RAM / FLASH split (SRAM_CODE_MODE) configuration:"
+	@echo "  This project uses mode 00: 192K FLASH + 128K RAM."
+	@echo "  You must set the correct split on the chip BEFORE flashing firmware."
+	@echo "  make split-info                  - read current option bytes (minichlink -i)"
+	@echo "  make split-set MODE=N            - set SRAM_CODE_MODE and reboot."
+	@echo "                                       MODE=0 -> 192K FLASH + 128K RAM (default)"
+	@echo "                                       MODE=1 -> 224K FLASH +  96K RAM"
+	@echo "                                       MODE=2 -> 256K FLASH +  64K RAM"
+	@echo "                                       MODE=3 -> 288K FLASH +  32K RAM"
+	@echo "                                     Uses minichlink by default. Pass TOOL=openocd"
+	@echo "                                     to use the OpenOCD path instead."
+	@echo "  make split-set-openocd MODE=N    - set split via OpenOCD"
+	@echo "  make split-set-minichlink MODE=N - set split via minichlink"
 	@echo "Maintenance:"
 	@echo "  make clean                   - remove the build/ directory"
 	@echo "  make rebuild                 - clean + all"
@@ -596,3 +610,91 @@ resume: check-minichlink
 reboot: check-minichlink
 	@echo "Rebooting CPU via minichlink (-b) ..."
 	"$(MINICHLINK)" -b
+
+# ----------------------------------------------------------------------------
+# RAM / FLASH split configuration.
+#
+# The CH32V303 SRAM_CODE_MODE field (USER[7:6] in the option byte at
+# 0x1FFFF802) selects the FLASH/RAM split.  This project requires MODE=0
+# (192K FLASH + 128K RAM) to match the linker scripts in Bootloader/Ld and
+# firmware/Ld.  The new value is applied at next reset.
+#
+# Option byte format: a 16-bit half-word where the low byte is the value and
+# the high byte is its bitwise complement.  Other USER bits default to 0x3F
+# (bits 0..5 = 1, bits 6..7 = SRAM_CODE_MODE).
+#
+#   MODE=0 -> byte 0x3F, half-word 0xC03F  (192K FLASH + 128K RAM) <-- required
+#   MODE=1 -> byte 0x7F, half-word 0x807F  (224K FLASH +  96K RAM)
+#   MODE=2 -> byte 0xBF, half-word 0x40BF  (256K FLASH +  64K RAM)
+#   MODE=3 -> byte 0xFF, half-word 0x00FF  (288K FLASH +  32K RAM)
+# ----------------------------------------------------------------------------
+
+# Default to the project's required mode.
+SPLIT_MODE ?= 0
+
+# Validate the mode argument and compute the option-byte half-word.
+ifeq ($(SPLIT_MODE),0)
+SPLIT_OB_WORD := 0xC03F
+SPLIT_DESC    := "192K FLASH + 128K RAM"
+else ifeq ($(SPLIT_MODE),1)
+SPLIT_OB_WORD := 0x807F
+SPLIT_DESC    := "224K FLASH + 96K RAM"
+else ifeq ($(SPLIT_MODE),2)
+SPLIT_OB_WORD := 0x40BF
+SPLIT_DESC    := "256K FLASH + 64K RAM"
+else ifeq ($(SPLIT_MODE),3)
+SPLIT_OB_WORD := 0x00FF
+SPLIT_DESC    := "288K FLASH + 32K RAM"
+else
+$(error Invalid SPLIT_MODE='$(SPLIT_MODE)'; must be 0, 1, 2, or 3)
+endif
+
+# Read current option bytes via minichlink.
+split-info: check-minichlink
+	@echo "Reading chip info / option bytes via minichlink (-i) ..."
+	"$(MINICHLINK)" -i
+
+# Common warning emitted by both programmer paths before changing option bytes.
+define SPLIT_WARN
+	@echo ""; \
+	echo "*** WARNING: changing SRAM_CODE_MODE ***"; \
+	echo "Target split: $(SPLIT_DESC) (MODE=$(SPLIT_MODE))"; \
+	echo "Option byte at 0x1FFFF802 will be programmed with $(SPLIT_OB_WORD)."; \
+	echo "A system reset is required for the new split to take effect."; \
+	echo ""
+endef
+
+# Set SRAM_CODE_MODE via OpenOCD.
+split-set-openocd:
+	@if [ ! -f "$(OPENOCD)" ]; then \
+		echo "Error: OpenOCD not found at $(OPENOCD)"; \
+		echo "Set MRS_TOOLCHAIN_ROOT, for example:"; \
+		echo "  make split-set-openocd MRS_TOOLCHAIN_ROOT=/path/to/MRS_Toolchain_Linux_x64_V1.91"; \
+		exit 1; \
+	fi
+	$(SPLIT_WARN)
+	sudo "$(OPENOCD)" \
+		-f "$(OPENOCD_CFG)" \
+		-c "init; halt; flash write_word 0x1FFFF802 $(SPLIT_OB_WORD); reset; exit"
+	@echo "Split updated. Power-cycle the board before flashing firmware."
+
+# Set SRAM_CODE_MODE via minichlink.  minichlink exposes the user option
+# byte at the standard address 0x1FFFF802; we write the half-word there and
+# reboot the chip so the new value takes effect.
+split-set-minichlink: check-minichlink
+	$(SPLIT_WARN)
+	@echo "Writing option byte 0x1FFFF802 = $(SPLIT_OB_WORD) ..."
+	"$(MINICHLINK)" -w "$(SPLIT_OB_WORD)" 0x1FFFF802 -b
+	@echo "Split updated. Power-cycle the board before flashing firmware."
+
+# Convenience dispatcher: pick the programmer from TOOL=minichlink|openocd.
+SPLIT_TOOL ?= minichlink
+split-set:
+	@if [ "$(SPLIT_TOOL)" = "openocd" ]; then \
+		$(MAKE) split-set-openocd SPLIT_MODE=$(SPLIT_MODE); \
+	elif [ "$(SPLIT_TOOL)" = "minichlink" ]; then \
+		$(MAKE) split-set-minichlink SPLIT_MODE=$(SPLIT_MODE); \
+	else \
+		echo "Error: SPLIT_TOOL must be 'minichlink' or 'openocd' (got '$(SPLIT_TOOL)')"; \
+		exit 1; \
+	fi

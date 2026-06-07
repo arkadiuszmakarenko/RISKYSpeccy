@@ -185,6 +185,86 @@ GPIOD->CFGLR = 0x44444444;          /* all 8 pins → floating input   */
 
 ---
 
+## Two-ISR interaction (sequence diagram)
+
+The player runs **two cooperating ISRs**:
+
+- `TAP_TimerISR` (TIM2, VTF slot 2) — *time domain*: advances the state
+  machine and toggles `s_ear_bit` at every pilot/sync/data half-pulse.
+- `TAP_IorqISR` (EXTI9_5, VTF slot 1) — *bus domain*: drives the current
+  `s_ear_bit` onto D0–D7 when the Z80 actually reads `IN A,(#FE)`.
+
+They share **only** the `s_ear_bit` variable — no queue, no lock.  The
+TIM2 ISR is responsible for keeping `s_ear_bit` valid; the IORQ ISR
+samples it atomically on each Z80 read.
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant ROM as ZX ROM tape loader
+    participant Z as Z80 CPU
+    participant E as Edge connector<br/>(A0, D0-D7,<br/>/IORQ, /RD)
+    participant IORQ as TAP_IorqISR<br/>(EXTI9_5, VTF slot 1)
+    participant TIM as TAP_TimerISR<br/>(TIM2, VTF slot 2)
+    participant SM as State machine<br/>s_ear_bit, s_state
+    participant CH as CH32 main thread
+
+    Note over CH,SM: Setup (once)
+    CH->>CH: ZX_RomcsRelease() — ZX ROM visible
+    CH->>Z: ZX_Z80Reset() — boots to BASIC
+    Z->>ROM: user types LOAD "" + Enter
+    CH->>SM: TAP_Player_Load(path) → parse TAP/TZX
+    CH->>CH: TAP_Player_Start()
+    CH->>TIM: SetVTFIRQ slot 2 — arm TIM2 one-shot
+    CH->>IORQ: SetVTFIRQ slot 1 + NVIC_Enable — arm EXTI9_5
+    Note over TIM: pilot half-pulse begins
+
+    Note over TIM,SM: Time domain — state advance
+    loop every pilot / sync / data half-pulse (TIM2 one-shot)
+        TIM->>SM: read current state (PILOT, SYNC, DATA, PAUSE...)
+        TIM->>SM: toggle s_ear_bit (except in PAUSE)
+        TIM->>TIM: load TIM2->ATRLR = next half-pulse, restart
+    end
+
+    Note over ROM,IORQ: Bus domain — Z80 reads EAR
+    ROM->>Z: IN A,(#FE)
+    Z->>E: /IORQ LOW, A0 LOW, /RD LOW, A[7:0] = 0xFE
+    E->>IORQ: EXTI9_5 fires (PC8 falling edge)
+    IORQ->>E: sample A0 (GPIOE bit 0)
+    IORQ->>E: sample /RD (GPIOB pin 5)
+    alt gate passes (A0=0 AND /RD=0)
+        IORQ->>SM: read s_ear_bit
+        IORQ->>E: GPIOD PP output, D[7:0] = {1, EAR, 1, 11111b}
+        E-->>Z: Z80 latches data byte
+        Z-->>ROM: A register = data (EAR in bit 6)
+        IORQ->>E: wait /RD HIGH → tristate GPIOD
+    else not ULA IN (OUT, INTACK, A0=1)
+        IORQ->>E: clear EXTI pending, return
+    end
+
+    Note over ROM,SM: ROM advances its own sync/data detection
+    Note over ROM: count pilot pulses<br/>wait sync1 + sync2
+    Note over ROM: per byte — count 8 EAR transitions
+    Note over ROM: CRC + length checks<br/>advance to next block
+
+    Note over TIM,CH: Completion
+    TIM->>SM: last block done → TAP_DONE
+    TIM->>TIM: NVIC_DisableIRQ(EXTI9_5_IRQn) — IORQ ISR off
+    TIM->>CH: TAP_Player_IsRunning() returns 0
+    CH->>CH: monitor sees load complete
+```
+
+**Why two ISRs and not one?**  The TIM2 ISR is purely a time reference
+(it never touches the bus, so it can never collide with the ULA); the
+IORQ ISR is purely a bus reaction (it cannot predict the next Z80 read).
+A single ISR that did both would have to either guess when the next
+half-pulse should end *and* race the ULA for the bus every time, or
+block both domains inside one critical section.  Splitting them along
+the time/bus axis removes the contention entirely at the cost of a
+single shared byte (`s_ear_bit`).
+
+---
+
 ## Usage sequence
 
 ```

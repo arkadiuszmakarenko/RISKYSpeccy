@@ -10,18 +10,8 @@ Supported snapshot formats:
 
 Hardware modes: 48 K and 128 K/+2 are supported; SamRam, +2A/+3 are rejected.
 
----
-
-## Hardware overview
-
-| Signal   | GPIO          | Direction (default) | Purpose                                  |
-|----------|---------------|---------------------|------------------------------------------|
-| ROMCS    | GPIOB Pin 3   | Output push-pull HIGH | Selects cartridge ROM over ZX internal ROM |
-| /RESET   | GPIOC Pin 6   | Input pull-up (pulse OD LOW to reset) | Z80 hardware reset |
-| /INT     | GPIOB Pin 12  | Output open-drain HIGH | Triggers NMI on Z80 (pulsed LOW) |
-| Address  | GPIOE[15:0]   | Input floating      | Z80 address bus sampled in ISR           |
-| Data     | GPIOD[7:0]    | Input / output PP   | Z80 data bus (driven only during reads)  |
-| MREQ     | GPIOB Pin 10  | Input → EXTI trigger | EXTI15_10 fires on every memory access   |
+For the complete CH32↔Z80 pin map (GPIOE / GPIOD / GPIOB / GPIOC assignments,
+modes, and active levels), see [zx_bus.md — Hardware connections](zx_bus.md#hardware-connections).
 
 **Key principle**: while ROMCS is driven HIGH by the CH32, the cartridge ROM
 (`zxprog`) appears at addresses `0x0000–0x3FFF`.  The cartridge also has a 4 KB
@@ -272,6 +262,64 @@ The ROMCS handover happens a few microseconds later inside the ISR.
 
 ---
 
+## Launch sequence (overview)
+
+The same flow as the ASCII timeline below, but as a sequence diagram so
+the mailbox exchanges and the ROMCS handover are easier to follow.
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant C as CH32 (RISC-V)
+    participant N as Cart RAM<br/>(0x3000-0x3FFF)
+    participant Z as Z80 (zxprog / _zx_launcher)
+    participant U as ZX ULA + ROM
+
+    Note over C,Z: Phase 1 — Boot
+    C->>Z: /RESET LOW 80 ms, then release
+    C->>C: PB3 ROMCS = HIGH (cart ROM selected)
+    Z->>C: MREQ falls on 0x0000
+    C-->>Z: drive g_zx_image[0x0000] on D0-D7
+    Note over Z: zxprog runs _startup, EI, main()
+
+    Note over C,Z: Phase 2 — Snapshot body (49 KB) via WCMD NMI
+    C->>N: write 512-byte body chunk (direct, no NMI)
+    C->>N: set LOADER_FLAGS bit 0 (border anim)
+    C->>N: WCMD_SEQ++, WCMD_DST, WCMD_LEN
+    C->>Z: /INT LOW 40 µs → NMI fires
+    Z->>N: wcmd_poll copies chunk into ZX RAM
+    Z-->>C: WCMD_DONE echoes SEQ
+    Note over C: repeats 96× for full 48K body,<br/>border cycles {BLUE,CYAN,RED,MAG,YEL,GRN}
+
+    Note over C,Z: Phase 2b — 128K paging (per RAM page)
+    C->>N: PGCMD_SEQ++, PGCMD_VAL = page byte
+    C->>Z: NMI fires
+    Z->>U: OUT (0x7FFD), PGCMD_VAL
+    Z-->>C: PGCMD_DONE echoes SEQ
+
+    Note over C,Z: Phase 3a/3b — Direct cart-RAM writes
+    C->>N: REGBLOCK (26 B at 0x3F90) — direct
+    C->>N: LAUNCHER_TAIL (6 B at 0x3FF0) — direct
+    C->>N: LAUNCHER_ALIVE = 0x00, then TRIGGER = 0x55
+
+    Note over C,Z: Phase 4-6 — Launcher fires
+    Note over Z: DI<br/>border WHITE<br/>ALIVE ← 0xAA
+    Z->>N: _zx_launcher reads regblock + tail
+    Z->>C: ISR serves 0x3FF5 (pc_hi)
+    C->>C: ROMCS → input-floating (tristate)<br/>EXTI15_10 disabled
+    Z->>U: JP user_pc — game starts
+    Z->>U: subsequent 0x0000-0x3FFF reads served by ZX ROM
+
+    Note over C: Phase 7 — Confirm
+    C->>N: poll ALIVE == 0xAA
+    C-->>C: ZX_LaunchZ80 returns 1
+```
+
+For the byte-accurate ASCII timeline (with border colours and the
+NVIC-disable windows in the handover) see the next section.
+
+---
+
 ## Summary timeline
 
 ```
@@ -302,16 +350,96 @@ ZX_LaunchZ80 returns 1
 
 ---
 
+## Snapshot processing pipeline (`Z80_LoadAndRun`)
+
+The diagram above shows what happens *on the wires*.  This one shows the
+**CH32-side processing** of a `.z80` file from the moment the user types
+its name at the terminal prompt until the launcher fires.  It is a
+flowchart of the `Z80_LoadAndRun()` function in
+[User/z80_loader.c](../User/z80_loader.c).
+
+```mermaid
+flowchart TD
+    A([User picks .z80 file in<br/>zx_terminal / LOAD command]) --> B[Z80_LoadAndRun path]
+    B --> C{z80_open_and_parse}
+    C -->|FR_OK| D[z80_parse_base_header<br/>30 bytes]
+    D --> E{PC == 0?}
+    E -->|yes v2/v3| F[z80_read_ext_header<br/>+2 len, +23/54/55 ext]
+    E -->|no v1| G[Mark v1, hw_mode = 48K]
+    F --> H{z80_is_48k?}
+    G --> H
+    H -->|no| X1([Reject: SamRam/+2A/+3])
+    H -->|yes| I[Set LOADER_FLAGS bit 0<br/>border anim on]
+
+    I --> J{v1?}
+    J -->|v1 raw| K[z80_stream_body<br/>flat 49152 B<br/>512-B WCMD chunks x96]
+    J -->|v1 RLE| L[z80_rle_decompress<br/>into out_buf<br/>then stream via WCMD]
+    J -->|v2/v3| M[z80_stream_v2v3_body<br/>dispatch 16K pages<br/>PGCMD page + WCMD body]
+
+    K --> N[Clear LOADER_FLAGS]
+    L --> N
+    M --> N
+    N --> O[Build ZX_Z80State<br/>from Z80Header]
+    O --> P{128K snapshot?}
+    P -->|no| Q1[pval = 0x30<br/>ROM1 + lock]
+    P -->|yes| Q2[pval = page_7ffd and 0x3F or 0x10<br/>ROM1 + snapshot page]
+    Q1 --> R[ZX_128kPage via PGCMD NMI]
+    Q2 --> R
+    R --> S[ZX_LaunchZ80 and state]
+    S --> T([Go to Phase 4-6<br/>launch sequence])
+
+    classDef reject fill:#ffe1e1,stroke:#c00,stroke-width:1px;
+    classDef start  fill:#e1f0ff,stroke:#0366d6,stroke-width:2px;
+    classDef finish fill:#d4f4dd,stroke:#2a7,stroke-width:2px;
+    class X1 reject
+    class A start
+    class T finish
+```
+
+**Key stages**:
+
+1. **Parse** — `z80_open_and_parse` opens the file on the SD card (FatFs),
+   reads the 30-byte base header, and (if `PC == 0`, the v2/v3 marker)
+   reads the extended header.  Non-48K hardware modes (SamRam, +2A, +3)
+   are rejected by `z80_is_48k`.
+2. **Border animation** — `LOADER_FLAGS` bit 0 is set before the body
+   stream and cleared after, so `wcmd_poll` cycles the border only during
+   the actual snapshot body transfer.
+3. **Body streaming** — three paths:
+   - **v1 raw**: 96 × 512-byte WCMD chunks to `0x4000..0xFFFF`.
+   - **v1 RLE**: decompress into a 49 KB staging buffer, then stream the
+     same way.
+   - **v2/v3 paged**: for each 16 KB page, optionally issue a PGCMD
+     (`OUT (0x7FFD), page`) to bank it in, then WCMD the body.  128K
+     snapshots use up to 8 pages.
+4. **State build** — the parsed `Z80Header` is mapped into the
+   `ZX_Z80State` struct that `ZX_LaunchZ80` consumes to build the
+   regblock at `0x3F90`.
+5. **Final paging** — one last `ZX_128kPage` (PGCMD NMI) sets `0x7FFD`
+   to the correct launch value: `0x30` for 48K (ROM1 + lock), or
+   `(page_7ffd & 0x3F) | 0x10` for 128K (ROM1 + snapshot page).
+6. **Launch** — `ZX_LaunchZ80` writes regblock + tail directly to cart
+   RAM, arms `handover_addr = 0x3FF5`, writes `TRIGGER = 0x55`, and
+   waits for `ALIVE == 0xAA` — handing off to the sequence diagram
+   above.
+
+---
+
 ## Cart RAM layout
 
 Full mailbox and data map for the 4 KB cart RAM window (`0x3000–0x3FFF`):
 
 ```
+0x3000–0x3029   BRIDGE_TEXT  bridge text buffer (40 bytes) — see zx_terminal.md
 0x3028          KEY_SEQ        Z80→CH32 key event sequence
 0x3029          KEY_CODE       ASCII code of last key pressed
-0x302A          PGCMD_SEQ      CH32→Z80 port 0x7FFD command sequence
-0x302B          PGCMD_DONE     Z80 echo when OUT is done
-0x302C          PGCMD_VAL      byte to write to port 0x7FFD
+0x302A          PGCMD_SEQ  *   CH32→Z80 port 0x7FFD command sequence (load only)
+0x302B          PGCMD_DONE *   Z80 echo when OUT is done (load only)
+0x302C          PGCMD_VAL  *   byte to write to port 0x7FFD (load only)
+0x302A          VIEW_SEQ   *   CH32→Z80 RAM viewer sequence (post-launch only)
+0x302B          VIEW_ADDR_LO   low byte of viewer start address
+0x302C          VIEW_ADDR_HI   high byte of viewer start address
+0x302D          VIEW_LEN       byte count (max 16)
 0x302E          WCMD_SEQ       CH32→Z80 write-block command sequence
 0x302F          WCMD_DONE      Z80 echo when copy is done
 0x3030–0x3031   WCMD_DST       target address in ZX RAM (little-endian)
@@ -330,6 +458,13 @@ Full mailbox and data map for the 4 KB cart RAM window (`0x3000–0x3FFF`):
 0x3FAA          LAUNCHER_ALIVE launcher writes 0xAA when running
 0x3FF0–0x3FF5   LAUNCHER_TAIL  [ED, IM_byte, EI/NOP, C3, pc_lo, pc_hi]
 ```
+
+> **Mutual exclusivity (PGCMD vs VIEW):** `0x302A–0x302C` is shared between
+> the **PGCMD** mailbox (snapshot loading, Phase 3c) and the **VIEW**
+> mailbox (RAM viewer, post-launch). They are time-sequenced: the CH32
+> only drives PGCMD_SEQ during a `.z80` launch, and the terminal only
+> drives VIEW_SEQ after the launcher has handed ROMCS back. See
+> [zx_terminal.md — RAM viewer](zx_terminal.md#ram-viewer-zxview).
 
 ---
 

@@ -11,6 +11,9 @@ and provides:
 - **On-screen UI** — full-screen file browser and VT100-compatible terminal
   rendered by the CH32 onto the ZX screen via the NMI mailbox, without any
   Z80 cooperation.
+
+See [docs/](docs/) for architecture and subsystem documentation.
+
 ---
 
 ## Repository layout
@@ -41,7 +44,7 @@ Download from [MounRiver Studio](http://www.mounriver.com/) or extract the
 standalone toolchain archive.  The default path expected by the Makefile is:
 
 ```
-/home/<user>/RISC-V_Embedded_GCC12
+~/RISC-V_Embedded_GCC12
 ```
 
 **Z80 toolchain** (for the `zx_src` sub-firmware):
@@ -65,228 +68,145 @@ Override the toolchain path if needed:
 make TOOLCHAIN_DIR=/path/to/RISC-V_Embedded_GCC12
 ```
 
-The build outputs land in `build/`:
-
-| File | Description |
-|------|-------------|
-| `build/RISKYSpeccy.elf` | Linked ELF (for debugging / flashing via OpenOCD) |
-| `build/RISKYSpeccy.bin` | Raw binary for flashing |
-| `build/RISKYSpeccy.hex` | Intel HEX for flashing |
-
-### Clean
+Useful targets:
 
 ```sh
+make help                # full list of targets
+make build-all-versions  # bootloader + both app variants + combined image
+make versions            # show all output artifact paths
 make clean
 ```
 
-### Flashing
+Build outputs land in `build/`.
 
-Flash `build/RISKYSpeccy.bin` to the CH32V307 using WCH-LinkE and the
-[WCH Flash Tool](https://www.wch.cn/downloads/WCHISPTool_Setup_exe.html)
-or OpenOCD with the WCH patch.
+### Flashing options
+
+| Mode | Command | Output | When to use |
+|------|---------|--------|-------------|
+| **Combined** (default) | `make flash` | `build/RISKYZXS_COMBINED.bin` | Fresh cartridge setup or bootloader + app in one shot |
+| **Standalone (no BL)** | `make flash-standalone` | `build/RISKYSpeccy.bin` | Development or single-firmware deployment |
+| **Bootloader only** | `make flash-bootloader` | `build/bootloader/Bootloader.bin` | Bootloader maintenance / recovery |
+| **App via USB** | _(copy to USB drive)_ | `build/RISKYZXS.UPD` | After bootloader is installed |
+
+The Linux `make flash*` targets drive a **WCH-LinkE** via OpenOCD.
+
+#### Programming on Windows with WCH tools
+
+1. Install [WCHISPTool](https://www.wch.cn/downloads/WCHISPTool_Setup_exe.html)
+   and the **WCH-LinkE** USB driver (WCH provides a signed INF/VCP driver
+   bundle — let the installer do it, or grab the driver from the
+   MounRiver Studio distribution).
+2. Connect the **WCH-LinkE** to the cartridge's SWD header (SWDIO / SWCLK /
+   GND).  Power the Spectrum so the CH32V307 is alive on the edge connector.
+3. Launch **WCHISPTool** and pick the chip family **CH32V30x** (the
+   CH32V307 lives in this group).
+4. In the device list, select the WCH-LinkE you just plugged in.  The tool
+   should show the chip's `Device ID` once it talks to the target.
+5. Click **...** next to the file box and point it at the build output:
+   - `build/RISKYZXS_COMBINED.bin` — bootloader + application in one shot
+     (use the **.bin** image, not `.elf`/`.hex`)
+   - `build/RISKYSpeccy.bin` — application only (no bootloader)
+   - `build/bootloader/Bootloader.bin` — bootloader only
+6. Set the start address to **`0x08000000`** for any of the above.
+7. Enable **"Erase before program"** and **"Verify after program"**, then
+   click **Download** (or press F5).  Progress shows in the status bar;
+   "Success" means programming finished and verified.
+
+#### Updating the application via USB (no programmer)
+
+For the **app-via-USB** path, the bootloader must already be installed on
+the cartridge (use the WCHISPTool flow above once with the combined or
+bootloader image to put it in place).
+
+1. Copy `build/RISKYZXS.UPD` to the **root** of a **FAT12/FAT16/FAT32**
+   formatted USB drive.
+2. Insert the USB drive into the cartridge's USB port.
+3. To **force IAP mode** (e.g. if the application is wedged and you want
+   to reflash), fit a jumper across the **SWDIO / SWCLK** header pins
+   before powering on.
+4. Power on (or reset) the cartridge. The Ready LED should flash 3 times.
+   The bootloader detects the drive and programs the application. If
+   programming was successful, the Ready LED will flash slowly 10 times.
+   If unsuccessful, it will start rapidly flashing.
+
+
+See [docs/bootloader.md](docs/bootloader.md) for the full update flow,
+state-machine details, and recovery options.
 
 ---
 
-## Documentation
+## CH32V303 RAM / FLASH split
 
-| Document | Description |
-|----------|-------------|
-| [docs/bootloader.md](docs/bootloader.md) | Custom IAP bootloader: memory layout, USB firmware update flow, FAT filesystem integration, pre-inserted drive detection, recovery mechanisms |
-| [docs/zx_bus.md](docs/zx_bus.md) | Hardware-level CH32–ZX bus interface: GPIO wiring, `RunCartWithRAM` ISR, ROMCS/NMI/reset control, mailbox protocol |
-| [docs/z80_launch_mechanism.md](docs/z80_launch_mechanism.md) | Full `.z80` snapshot launch sequence: parsing, PGCMD paging, register restore, ROMCS handover |
-| [docs/tape_player.md](docs/tape_player.md) | `.tap`/`.tzx` playback: TZX→TAP conversion, timing tables, two-ISR state machine, EAR injection |
-| [docs/zx_terminal.md](docs/zx_terminal.md) | On-screen UI: virtual terminal, file browser, bridge text, rendering pipeline, public API |
+The CH32V303 lets you trade FLASH for RAM (or vice versa) via the
+**SRAM_CODE_MODE** field — bits `[7:6]` of the USER option byte at
+`0x1FFFF802`.  The four available splits are:
 
----
+| SRAM_CODE_MODE | FLASH  | RAM    |
+|----------------|--------|--------|
+| `00`           | 192 KB | 128 KB |
+| `01`           | 224 KB |  96 KB |
+| `10`           | 256 KB |  64 KB |
+| `11`           | 288 KB |  32 KB |
 
-## Bootloader
+This project uses **`00`** (192 KB FLASH + 128 KB RAM).  **You must set
+this split before flashing the firmware**, otherwise RAM and FLASH regions
+will not match the linker script and the firmware will not run.
 
-### Overview
+### Setting the split with WCHISPTool (recommended)
 
-The RISKY Speccy includes a custom **in-application programming (IAP) bootloader** that:
+This is the easiest method and requires only the WCH-LinkE programmer.
 
-- **Resides at flash offset 0x00000000** in a reserved 16 KB region
-- **Provides USB-based firmware updates** via Petit FatFS and USB MSC (Mass Storage Class)
-- **Allows zero-downtime firmware upgrades** by programming the application at offset 0x00004000
-- **Detects pre-inserted USB drives** at boot without requiring unplug/replug
-- **Falls back to IAP mode** automatically if application is invalid after reboot
+1. Open **WCHISPTool**, select chip family **CH32V30x**, and connect to the
+   target (same as for flashing firmware — see [Flashing options](#flashing-options)).
+2. Switch to the **Config** (or **Option Byte**) tab.
+3. Locate the **SRAM_CODE_MODE** field (labelled `USER[7:6]` in some
+   versions).
+4. Select **`00`** from the drop-down to configure 192 KB FLASH + 128 KB RAM.
+5. Click **Program** (or **Download**) to write the option byte.
+6. Power-cycle or reset the board.  The new split is now active and you can
+   proceed to flash the firmware.
 
-### Memory Layout
+### Setting the split with the Makefile (Linux + WCH-LinkE)
 
-```
-Flash Memory (192 KB total, SRAM_CODE_MODE=00):
-  0x00000000 - 0x00003FFF: Bootloader  (16 KB, reserved)
-  0x00004000 - 0x0002FFFF: Application (176 KB available)
+The repository provides Makefile targets that set the split and reboot the
+chip in one step.  This is the quickest path on Linux.
 
-RAM (128 KB):
-  0x20000000 - 0x2001FFFF
-```
+| Command | Description |
+|---------|-------------|
+| `make split-info` | Read current option bytes (uses `minichlink -i`) |
+| `make split-set` | Set the split to `MODE=0` (192K FLASH + 128K RAM) via minichlink |
+| `make split-set MODE=0 SPLIT_TOOL=openocd` | Same, but uses OpenOCD |
+| `make split-set-minichlink MODE=N` | Set split via minichlink, `N` = 0..3 |
+| `make split-set-openocd MODE=N` | Set split via OpenOCD, `N` = 0..3 |
 
-### Flashing Options
-
-The unified build system supports three deployment modes:
-
-| Mode | Command | Output File | When to Use |
-|------|---------|------------|-------------|
-| **Combined** (default) | `make flash` | `build/RISKYZXS_COMBINED.bin` | Fresh cartridge setup or bootloader update + app in one shot |
-| **Bootloader only** | `make flash-bootloader` | `build/bootloader/Bootloader.bin` | Bootloader maintenance/recovery |
-| **App update via USB** | _(not make)_ | `build/RISKYZXS.UPD` | After bootloader is installed; copy `.UPD` file to USB drive |
-| **Standalone (no BL)** | `make flash-standalone` | `build/RISKYSpeccy.bin` | Development or dedicated single-firmware deployment |
-
-### Building All Variants
+`MODE` values: `0` = 192K FLASH + 128K RAM, `1` = 224K + 96K, `2` = 256K + 64K,
+`3` = 288K + 32K.  **This project requires `MODE=0`.**
 
 ```sh
-# Build bootloader, both app variants, and combined image:
-make build-all-versions
+# Default (recommended): mode 0 via minichlink
+make split-set
 
-# View all output artifact paths:
-make versions
+# Mode 0 via OpenOCD
+make split-set SPLIT_TOOL=openocd
 
-# Full help:
-make help
+# Power-cycle the board, then flash firmware
+make flash
 ```
 
----
+> After writing, power-cycle the board before flashing firmware.
 
-## USB Firmware Upgrades
+### Setting the split with OpenOCD / WCH-LinkE on Linux (manual)
 
-### Entering IAP (Bootloader) Mode
-
-The bootloader checks a jumper on the **SWDIO / SWCLK** pins at power-on to decide whether to enter IAP mode or jump straight to the application:
-
-| Pin | Role | Signal |
-|-----|------|--------|
-| **PA13 (SWDIO)** | Output | Driven **low** by bootloader |
-| **PA14 (SWCLK)** | Input | Pull-up; reads low when jumpered to PA13 |
-
-**To enter IAP mode:** place a jumper (or short) across the **SWDIO** and **SWCLK** header pins before powering on.
-
-```
-SWDIO (PA13) ──┐
-               ├── [jumper] ──> PA14 reads LOW  →  IAP mode
-SWCLK (PA14) ──┘
-
-No jumper: PA14 pull-up keeps HIGH  →  jump to application
+```sh
+openocd -f interface/wch-riscv.cfg \
+        -c "init; halt; \
+            flash write_word 0x1FFFF802 0xC03F; \
+            reset; exit"
 ```
 
-**Step-by-step:**
+The half-word `0xC03F` encodes USER byte `0x3F` (`SRAM_CODE_MODE = 00`,
+all other bits at default) in the low byte and its complement `0xC0` in
+the high byte, as required by the option byte format.
 
-1. **Fit the jumper** across SWDIO / SWCLK on the cartridge header.
-2. **Insert your USB drive** with `RISKYZXS.UPD` in the root directory.
-3. **Power on** (or reset) the cartridge. The bootloader enters IAP mode automatically.
-4. Follow the USB upgrade procedure below.
-5. **Remove the jumper** before the next power cycle so the updated firmware boots normally.
+> After writing, power-cycle the board before flashing firmware.
 
-> **Note:** Fitting this jumper disables SWD debugging for the duration of boot. Remove it before attaching a WCH-Link for debugging.
-
----
-
-### Quick Start
-
-Once the bootloader is installed, you can update firmware via USB without a programmer:
-
-1. **Create a USB drive with the firmware update:**
-   ```sh
-   # Copy the update file to USB drive root:
-   cp build/RISKYZXS.UPD /mnt/usb/
-   ```
-
-2. **Insert USB drive into cartridge slot** (if not already inserted).
-
-3. **Power on the cartridge:**
-   - Bootloader detects the USB drive automatically.
-   - It displays: "INSERT USB DRIVE, PRESS ENTER TO CONTINUE"
-   - Press **Enter** on ZX keyboard.
-   - Bootloader reads `RISKYZXS.UPD` and programs it.
-   - Bootloader verifies the image.
-   - If successful, bootloader jumps to the new firmware.
-
-### Detailed Process
-
-#### Hardware Requirements
-
-- **USB drive** (FAT12/FAT16/FAT32 formatted)
-- **Firmware file** named `RISKYZXS.UPD` in drive root directory
-
-
-#### Bootloader State Machine
-
-1. **Initialization**
-   - Bootloader GPIO PA8 LED blinks slowly (ready state).
-   - USB host subsystem initializes.
-   - Bootloader polls for USB drive attachment or enumeration events.
-
-2. **USB Detection**
-   - If USB is already inserted at power-on, bootloader synthesizes a connect event (no replug needed).
-   - Performs device enumeration (get descriptor, set address, retrieve configuration).
-   - Mounts Petit FatFS filesystem.
-
-3. **File Lookup**
-   - Opens `/RISKYZXS.UPD` from drive root.
-   - If file not found, displays error on ZX screen and waits for next retry.
-
-4. **Image Programming**
-   - Reads file in 256-byte chunks (USB MSC resilience).
-   - Programs into flash at `0x08004000` with adaptive retry on transient read errors.
-   - Small delays inserted between reads to stabilize USB state machine.
-
-5. **Verification**
-   - Re-opens file and re-reads all bytes.
-   - Compares each byte with programmed flash.
-   - If mismatch, reports failure and waits.
-
-6. **Boot**
-   - If verification passes, bootloader checks if application is valid (non-erased vector word).
-   - Jumps to application at `0x08004000`.
-   - If application is invalid, stays in IAP mode and shows prompt again.
-
-#### Troubleshooting
-
-> All diagnostic messages below are printed over **USART1 at 115200 8N1**. Connect a serial adapter to the cartridge's UART TX pin to see them.
-
-| Symptom | Cause | Solution |
-|---------|-------|----------|
-| **"USB not ready (ret=255), re-prompting"** | USB state machine stuck or device not enumerated. | Press Enter again; bootloader will poll and retry. |
-| **"File not found"** | `RISKYZXS.UPD` missing from USB root or wrong filename. | Verify file exists: `ls /mnt/usb/RISKYZXS.UPD` |
-| **"Read err"** | USB read failure mid-transfer. | Try different USB drive or cable; reduce read chunk size. |
-| **"Flash err @0x..."** | Flash write protection or hardware failure. | Verify bootloader is not overwriting itself; check chip erased state. |
-| **"Vfy FAIL"** | Verification mismatch (corruption during program). | Retry the upgrade; check USB drive integrity. |
-
-### Bootloader Debug Output
-
-When the bootloader initializes with debug printf enabled, it prints on **USART1 at 115200 8N1**:
-
-```
-Initializing GPIO for IAP mode detection...
-Initializing IAP subsystem...
-Waiting for USB device...
-USB dev In.
-USB Port 00 Device Enumeration Succeed
-...
-File not found
-```
-
-If using a USB drive, successful upgrade looks like:
-
-```
-IAP: 71592 bytes
-Disk err, retry 1 @8192, req=256
-Disk err, retry 2 @8192, req=128
-Read err: 0 @8192/71592
-(no error; retry logic converged)
-...
-Verifying...
-Vfy OK
-```
-
-### Bootloader vs. Direct Flash
-
-| Aspect | Bootloader Path | Direct Flash (Programmer) |
-|--------|-----------------|--------------------------|
-| **Setup** | USB drive, ZX keyboard | WCH-Link USB + Flash Tool or OpenOCD |
-| **Time** | ~30–60 seconds | ~10–20 seconds |
-| **Risk** | Safe; stays in IAP if verification fails. | Higher; incorrect command = bricked chip. |
-| **Portability** | USB drive = any computer (Linux/macOS/Windows). | Requires toolchain + programmer. |
-| **Use Case** | End-user updates, field deployment. | Development, bootloader recovery. |
-
----

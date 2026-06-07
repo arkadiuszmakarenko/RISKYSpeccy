@@ -47,7 +47,7 @@ Key settings:
 - **RAM:** `ORIGIN=0x20000000, LENGTH=128K`
 - **All `.text`, `.data` LMA mapped to BOOT_FLASH** — linker enforces overflow error if bootloader > 16 KB
 - **PROVIDE(`_bootloader_limit` = 0x00004000)** — marks app start boundary
-- **PROVIDE(`_flash_limit` = 0x00030000)** — total on-chip flash end, used by IAP for upper-bound checks
+- **PROVIDE(`_flash_limit` = 0x00030000)** — total on-chip flash end (192 KB for `SRAM_CODE_MODE=00`; would be 0x00038000 = 224 KB in mode 01), used by IAP for upper-bound checks on erase/write operations
 
 ### Application Linker Script (Bootloader-linked variant)
 

@@ -49,7 +49,7 @@ int main (void) {
 
 
         printf ("Waiting for USB device...\r\n");
-        blinkLed (10, 500);
+        blinkLed (3, 500);
         while (1) {
             IAP_Main_Deal();
         }

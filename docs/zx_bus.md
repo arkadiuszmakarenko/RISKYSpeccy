@@ -57,6 +57,74 @@ tristates it immediately when `/RD` deasserts.
 
 ---
 
+## Bus architecture
+
+The CH32V307 and the Z80 share the cartridge edge connector as a
+**dual-ported** system: the CH32 owns the data/address bus during cart
+accesses, while the ZX ULA owns it the rest of the time. The cart RAM
+window (`0x3000–0x3FFF`) is a true shared region — both sides read and
+write the same physical bytes.
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant Z as Z80 CPU
+    participant E as Edge Connector<br/>(A0-A15, D0-D7,<br/>/MREQ, /RD, /WR)
+    participant ISR as RunCartWithRAM ISR<br/>(VTF slot 0, EXTI15_10)
+    participant MEM as ZX_Z80State<br/>g_zx_image[16K] / ram[4K]
+    participant CH as CH32 main thread
+
+    Note over Z,CH: ROM read (0x0000–0x2FFF)
+    Z->>E: assert /MREQ LOW, /RD LOW, A[15:0]
+    E->>ISR: EXTI15_10 fires (PE0-15 = address)
+    ISR->>MEM: read g_zx_image[address]
+    ISR->>E: drive D[7:0] = ROM byte (GPIOD PP)
+    ISR-->>Z: Z80 latches data
+    ISR->>E: /RD HIGH → tristate D[7:0]
+
+    Note over Z,CH: Cart RAM read (0x3000–0x3FFF)
+    Z->>E: assert /MREQ LOW, /RD LOW, A[15:0]
+    E->>ISR: EXTI15_10 fires
+    ISR->>MEM: read ram[address - 0x3000]
+    ISR->>E: drive D[7:0] = RAM byte
+    ISR-->>Z: Z80 latches data
+    ISR->>E: /RD HIGH → tristate D[7:0]
+    Note over ISR: check handover_addr<br/>(ROMCS release if match)
+
+    Note over Z,CH: Cart RAM write (0x3000–0x3FFF)
+    Z->>E: assert /MREQ LOW, /WR LOW, A[15:0], D[7:0]
+    E->>ISR: EXTI15_10 fires
+    ISR->>E: wait /WR LOW (data stable on D[7:0])
+    ISR->>MEM: ram[address - 0x3000] = GPIOD->INDR
+    ISR-->>E: /MREQ HIGH → clear EXTI pending, return
+
+    Note over Z,CH: CH32 mailbox write (WCMD / PGCMD)
+    CH->>MEM: NVIC disable → write ram[] directly
+    CH->>MEM: NVIC enable
+    CH->>E: pulse /INT LOW 40 µs (NMI trigger, PB12 OD)
+    E->>Z: NMI fires → zxprog wcmd_poll()
+    Z->>MEM: read WCMD fields, copy data to ZX RAM
+    Z->>MEM: write WCMD_DONE = WCMD_SEQ
+    CH->>MEM: poll WCMD_DONE == WCMD_SEQ (500 µs retry)
+```
+
+Key points the diagram shows:
+
+- **The Z80 bus signals are sampled, not bridged.** Every edge-connector
+  signal that matters (A0–A15, D0–7, /MREQ, /RD, /WR, /RESET) is wired
+  directly to a CH32 GPIO. There is no external latch or transceiver.
+- **`RunCartWithRAM` is the bus arbiter.** It runs on every /MREQ falling
+  edge (VTF slot 0, highest priority) and decides whether the CH32 must
+  drive the data bus (cart ROM / cart RAM read) or capture it (cart RAM
+  write). All other CH32 work is interrupted during this window.
+- **The cart RAM window is the shared mailbox region.** Both the Z80 (via
+  its bus cycles) and the CH32 (via `state_pointer->ram[]`) can read or
+  write the same 4 KB physical bytes — see
+  [Cart RAM layout](z80_launch_mechanism.md#cart-ram-layout) for the full
+  map.
+
+---
+
 ## ISR: `RunCartWithRAM`
 
 This is the hot-path ISR that runs on every Z80 memory access.  It is

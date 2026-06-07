@@ -233,6 +233,12 @@ The VIEW mailbox:
 0x302D  VIEW_LEN    — byte count (max 16)
 ```
 
+> **Shared with PGCMD:** `0x302A–0x302C` is also used by the **PGCMD**
+> mailbox during snapshot loading. The two are time-sequenced — the CH32
+> only drives VIEW_SEQ after ROMCS has been released, so they never
+> collide. See the full cart RAM map in
+> [z80_launch_mechanism.md — Cart RAM layout](z80_launch_mechanism.md#cart-ram-layout).
+
 ---
 
 ## Bridge text (`zxmsg`)
