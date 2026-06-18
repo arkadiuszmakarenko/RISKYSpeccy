@@ -94,6 +94,15 @@ static uint8_t s_key_last_seq = 0u;
 static uint8_t s_nmi_wcmd_seq = 0u;
 static uint8_t s_nmi_rcmd_seq = 0u;
 
+/* Set to 1 when the cart has been released to the ZX (ROMCS tristated, ISR
+ * disabled) — after a successful ZX_LaunchZ80 handover or an explicit
+ * ZX_RomcsRelease().  Cleared when the cart re-asserts control via
+ * ZX_RomcsAssert() or ZX_BecomeInterface2().  Used by
+ * ZX_HandleExternalResetIfAny() to decide whether a PC6 falling edge is
+ * meaningful (the user pressed the ZX hardware reset button while we were
+ * spun out). */
+static uint8_t s_cart_released = 0u;
+
 static void ZX_DataBusInput (void) {
     GPIOD->CFGLR = 0x44444444;
 }
@@ -390,6 +399,8 @@ void Init_Cart() {
     NVIC_EnableIRQ (EXTI15_10_IRQn);
 
     (void)ZX_CartRamReadBlock (ZX_KEY_SEQ_ADDR, &s_key_last_seq, 1u);
+    /* Fresh init — cart is in charge. */
+    s_cart_released = 0u;
 }
 
 void RunCartWithRAM (void) {
@@ -421,6 +432,11 @@ void RunCartWithRAM (void) {
                  |  ((0x4u << 24) | (0x4u << 28));
                 EXTI->INTENR &= ~sp->IRQLine;
                 NVIC_DisableIRQ (EXTI15_10_IRQn);
+                /* Cart is now released: the Z80 is running game code from
+                 * ZX RAM, ROMCS is floating, the ISR is masked.  Mark the
+                 * state so ZX_HandleExternalResetIfAny() will react to a
+                 * PC6 falling edge (ZX hardware reset) by re-engaging. */
+                s_cart_released = 1u;
             }
         }
     } else {
@@ -487,6 +503,9 @@ void ZX_RomcsRelease (void) {
        CFGHR bits [27:24] = PB14, [31:28] = PB15.  CNF=01 MODE=00 each. */
     GPIOB->CFGHR = (GPIOB->CFGHR & ~((0xFu << 24) | (0xFu << 28)))
                  |  ((0x4u << 24) | (0x4u << 28));
+    /* Cart released: arm external-reset detection for any post-release
+     * spin loops.  ZX_RomcsAssert() / ZX_BecomeInterface2() clear it. */
+    s_cart_released = 1u;
 }
 
 void ZX_RomcsAssert (void) {
@@ -508,6 +527,9 @@ void ZX_RomcsAssert (void) {
     EXTI->INTFR = EXTI_Line10;
     EXTI->INTENR |= EXTI_Line10;
     NVIC_EnableIRQ (EXTI15_10_IRQn);
+    /* Cart is back in charge — external-reset detection is no longer
+     * relevant until the next release. */
+    s_cart_released = 0u;
 }
 
 /* Switch the cart engine into "Interface 2" pure-ROM mode.
@@ -542,6 +564,9 @@ void ZX_BecomeInterface2 (const uint8_t *rom_16k) {
     EXTI->INTFR = EXTI_Line10;
     EXTI->INTENR |= EXTI_Line10;
     NVIC_EnableIRQ (EXTI15_10_IRQn);
+    /* IF2 mode is "cart owns the full 0x0000..0x3FFF window" — the cart is
+     * firmly in control, no external reset should re-engage anything. */
+    s_cart_released = 0u;
 }
 
 /* Reset the Z80 by pulling /RESET LOW via GPIOC Pin 6 (open-drain).
@@ -592,6 +617,76 @@ int ZX_128kPage (uint8_t val) {
         }
     }
     return 1;
+}
+
+int ZX_IsCartReleased (void) {
+    return (int)s_cart_released;
+}
+
+/* Detect a hardware reset of the ZX Spectrum asserted via the /RESET line
+ * wired to PC6.  Intended to be polled from any context that needs to know
+ * the user pressed the ZX hardware reset button — terminal idle loops (so
+ * the screen can be redrawn after zxprog clears it), and post-launch spin
+ * loops (so the cart can be re-engaged).
+ *
+ * Detection model: PC6 is configured as input pull-up after ZX_Z80Reset()
+ * (or as OD output released HIGH), so idle reads HIGH.  A falling edge (LOW)
+ * that persists past a 20 ms debounce window is treated as a real reset.
+ * We then wait for the line to come back HIGH (button released) before
+ * returning 1, so the caller doesn't fire actions while the user is still
+ * holding the button.
+ *
+ * Note: this function is called both during normal launcher operation
+ * (cart active, s_cart_released == 0) and after a launch handover.  It
+ * does NOT itself re-engage the cart — callers decide what to do:
+ *   - terminal idle loops: invalidate diff cache and redraw the screen
+ *   - post-launch spin loops: ZX_RomcsAssert + ZX_Z80Reset + break */
+int ZX_HandleExternalResetIfAny (void) {
+    static uint8_t armed = 1u;
+    static uint8_t in_reset = 0u;
+    uint8_t level;
+
+    level = ((GPIOC->INDR & GPIO_Pin_6) != 0u) ? 1u : 0u;
+
+    if (in_reset == 0u) {
+        /* Looking for the leading falling edge. */
+        if ((armed != 0u) && (level == 0u)) {
+            /* Candidate edge — debounce. */
+            Delay_Ms (20u);
+            level = ((GPIOC->INDR & GPIO_Pin_6) != 0u) ? 1u : 0u;
+            if (level == 0u) {
+                armed    = 0u;
+                in_reset = 1u;
+                /* Spin here until the ZX's reset button is released (line
+                 * goes HIGH).  Real Spectrum reset buttons press for tens of
+                 * ms; we want to avoid re-asserting the cart while the user
+                 * is still holding the button. */
+                while (level == 0u) {
+                    Delay_Ms (10u);
+                    level = ((GPIOC->INDR & GPIO_Pin_6) != 0u) ? 1u : 0u;
+                }
+                /* Give the Z80 time to finish its reset sequence and
+                 * zxprog's startup RAM clear (~50 ms total: 10 ms startup
+                 * LDIR init + 36 ms zx_startup_clear of 48 KB ZX RAM +
+                 * border GREEN).  Without this, callers that immediately
+                 * push screen content via the WCMD mailbox can race
+                 * against zxprog's RAM clear and end up with an empty
+                 * screen even though each WCMD transaction reports
+                 * success. */
+                Delay_Ms (120u);
+                return 1;
+            }
+        }
+    }
+
+    /* Re-arm once we've been HIGH for at least one full poll interval, so
+     * the next falling edge is treated as a fresh reset. */
+    if (level == 1u) {
+        armed    = 1u;
+        in_reset = 0u;
+    }
+
+    return 0;
 }
 
 int ZX_LaunchZ80 (const ZX_Z80State *state) {

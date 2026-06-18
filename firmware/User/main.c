@@ -66,8 +66,21 @@ int main (void) {
         /* Open file browser (blocks until the user selects a file or cancels). */
         if (ZX_TerminalCommandZ80Select (NULL)) {
             /* Z80 game launched inside the terminal; spin here forever.
-               Only a long-press hardware reset makes sense at this point. */
-            for (;;) { Handle_ResetButtonPA7(); }
+               Only a long-press hardware reset makes sense at this point.
+               Also poll for an external ZX hardware reset: if the user
+               presses the Spectrum's reset button (wired to PC6), the cart
+               has already tristated ROMCS and zxprog re-runs in isolation,
+               so we must re-assert the cart and re-launch the file
+               browser — otherwise the launcher never reappears. */
+            for (;;) {
+                if (ZX_HandleExternalResetIfAny ()) {
+                    printf ("ZX hardware reset detected — re-engaging cart\r\n");
+                    ZX_RomcsAssert();
+                    ZX_Z80Reset();
+                    break;
+                }
+                Handle_ResetButtonPA7();
+            }
         }
 
         /* .tap/.tzx selected: z80select already switched the ZX to BASIC and
@@ -77,22 +90,51 @@ int main (void) {
         if ((ZX_TerminalPendingTapSelection() != NULL) &&
             (ZX_TerminalPendingTapSelection()[0] != '\0')) {
 
-            /* Wait for a short press that actually starts the tape. */
+            /* Wait for a short press that actually starts the tape.
+               Also bail out on a ZX hardware reset — falling back to the
+               file browser is the cleanest recovery. */
             while (!TAP_Player_IsRunning()) {
+                if (ZX_HandleExternalResetIfAny ()) {
+                    printf ("ZX hardware reset detected — re-engaging cart\r\n");
+                    ZX_RomcsAssert();
+                    ZX_Z80Reset();
+                    ZX_TerminalClearPendingTapSelection();
+                    goto reopen_browser;
+                }
                 Handle_ResetButtonPA7();
             }
 
-            /* Tape is running: keep polling (allows long-press reset). */
+            /* Tape is running: keep polling (allows long-press reset and
+               external ZX reset). */
             while (TAP_Player_IsRunning()) {
+                if (ZX_HandleExternalResetIfAny ()) {
+                    printf ("ZX hardware reset detected — re-engaging cart\r\n");
+                    TAP_Player_Stop();
+                    ZX_RomcsAssert();
+                    ZX_Z80Reset();
+                    ZX_TerminalClearPendingTapSelection();
+                    goto reopen_browser;
+                }
                 Handle_ResetButtonPA7();
             }
 
             /* Tape finished: the Z80 is now running the loaded program.
-               Spin here like the z80 snapshot path — only a long-press
-               hardware reset (NVIC_SystemReset) makes sense at this point. */
+               Spin here like the z80 snapshot path — long-press hardware
+               reset or external ZX reset both bring the launcher back. */
             ZX_TerminalClearPendingTapSelection();
-            for (;;) { Handle_ResetButtonPA7(); }
+            for (;;) {
+                if (ZX_HandleExternalResetIfAny ()) {
+                    printf ("ZX hardware reset detected — re-engaging cart\r\n");
+                    ZX_RomcsAssert();
+                    ZX_Z80Reset();
+                    break;
+                }
+                Handle_ResetButtonPA7();
+            }
         }
         /* Nothing selected (user cancelled/escaped): loop and reopen browser. */
+        continue;
+reopen_browser:
+        ;
     }
 }

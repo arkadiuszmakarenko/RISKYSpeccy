@@ -40,6 +40,23 @@ void ZX_RomcsRelease (void);
 void ZX_RomcsAssert  (void);
 void ZX_Z80Reset     (void);  /* pulse /RESET LOW then wait 1200ms for zxprog init */
 
+/* Returns 1 if the cart has been released (ROMCS tristated) — i.e., after a
+ * ZX_LaunchZ80 handover or an explicit ZX_RomcsRelease.  Returns 0 while the
+ * cart ISR is still serving zxprog (launcher active). */
+int  ZX_IsCartReleased (void);
+
+/* Poll the ZX /RESET line (PC6) for a hardware reset event.  Returns 1 if a
+ * falling edge (with debounce) has been observed since the last call AND the
+ * cart is currently in the released state.  The caller is responsible for
+ * re-engaging the cart (ZX_RomcsAssert + ZX_Z80Reset) and exiting any
+ * post-launch spin loop.
+ *
+ * Must be polled regularly from any spin loop that runs after a launch
+ * handover, otherwise the cart firmware never notices that the user pressed
+ * the ZX Spectrum's hardware reset button — zxprog re-runs in isolation and
+ * the launcher never reappears. */
+int  ZX_HandleExternalResetIfAny (void);
+
 /* Switch the cart engine into Interface 2 pure-ROM mode.
  * rom_16k must point to a 16 KB image (zero-padded if the original cart was
  * smaller).  After return the cart ISR serves the full 0x0000..0x3FFF window

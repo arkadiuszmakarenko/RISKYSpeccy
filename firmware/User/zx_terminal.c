@@ -33,10 +33,10 @@
 #define ZX_SCREEN_WRITE_CHUNK 512u
 #define ZX_SCREEN_DIFF_MERGE_GAP 16u
 
-#define ZX_BROWSER_MAX_FILES 64u
 #define ZX_BROWSER_NAME_MAX (FF_MAX_LFN + 1u)
 #define ZX_BROWSER_PATH_MAX 320u
 #define ZX_BROWSER_PAGE_ROWS 18u
+#define ZX_BROWSER_JUMP_STEP 90u
 #define ZX_BROWSER_SCAN_RETRIES 8u
 #define ZX_BROWSER_RENDER_RETRIES 20u
 
@@ -62,13 +62,32 @@ static uint8_t s_term_csi_building = 0u;
 static uint8_t s_term_csi_value = 0u;
 static uint8_t s_selector_font_mode = 0u;
 static uint8_t s_browser_mode = 0u;
-static char s_browser_files[ZX_BROWSER_MAX_FILES][ZX_BROWSER_NAME_MAX];
-static uint8_t s_browser_is_dir[ZX_BROWSER_MAX_FILES];
-static uint8_t s_browser_count = 0u;
+
+/* Streaming directory browser: we never store the full directory listing.
+   Instead, an open DIR handle and a small ring buffer of the most-recently
+   displayed names let us render any page on demand by f_readdir()'ing forward
+   from the start of the directory.  This makes the on-screen file count
+   effectively unlimited and keeps RAM usage flat (~5 KB regardless of
+   directory size) at the cost of one full re-scan on each page jump.
+   The page cache stores one slot per visible row, indexed by the
+   *directory-entry* index it corresponds to. */
+static DIR     s_browser_dir;
+static uint8_t s_browser_dir_open = 0u;
+static char    s_browser_dir_path[ZX_BROWSER_PATH_MAX];
+
+/* Per-page name cache.  s_browser_cache_idx[i] is the directory-entry index
+   of the name stored in s_browser_cache_name[i].  A "miss" is resolved by
+   re-opening the directory and f_readdir()'ing to that index. */
+static uint16_t s_browser_cache_idx[ZX_BROWSER_PAGE_ROWS];
+static char     s_browser_cache_name[ZX_BROWSER_PAGE_ROWS][ZX_BROWSER_NAME_MAX];
+static uint8_t  s_browser_cache_is_dir[ZX_BROWSER_PAGE_ROWS];
+static uint8_t  s_browser_cache_valid[ZX_BROWSER_PAGE_ROWS];
+
+static uint16_t s_browser_count = 0u;
 static char s_z80select_pending[ZX_BROWSER_PATH_MAX];
 static char s_tapselect_pending[ZX_BROWSER_PATH_MAX];
 static char s_browser_path_stack[3][ZX_BROWSER_PATH_MAX];
-static uint8_t s_browser_selected_stack[3];
+static uint16_t s_browser_selected_stack[3];
 static uint8_t s_browser_stack_depth = 0u;
 
 #define ZX_BROWSER_MODE_Z80 0u
@@ -719,6 +738,10 @@ static int ZX_IsEnterKey (uint8_t key) {
     return (key == '\n') || (key == '\r');
 }
 
+/* Streaming browser: open `path` and count how many *visible* entries it
+   contains (directories first, then mode-filtered files).  No names are
+   stored -- the per-page cache is populated lazily by ZX_BrowserGetEntry().
+   Returns 1 on success (s_browser_count is valid), 0 on failure. */
 static int ZX_BrowserLoadFiles (const char *path) {
     DIR dir;
     FILINFO fno;
@@ -726,8 +749,18 @@ static int ZX_BrowserLoadFiles (const char *path) {
     const char *target = ((path != NULL) && (path[0] != '\0')) ? path : "/";
     uint8_t attempt;
 
+    /* Always invalidate the page cache when (re)loading a directory: the
+       cached names are indexed by absolute directory position, so they are
+       only valid while we stay in the same directory. */
+    for (attempt = 0u; attempt < ZX_BROWSER_PAGE_ROWS; ++attempt) {
+        s_browser_cache_valid[attempt] = 0u;
+        s_browser_cache_name[attempt][0] = '\0';
+        s_browser_cache_idx[attempt] = 0xFFFFu;
+        s_browser_cache_is_dir[attempt] = 0u;
+    }
+
     for (attempt = 0u; attempt < ZX_BROWSER_SCAN_RETRIES; ++attempt) {
-        s_browser_count = 0u;
+        uint16_t total = 0u;
 
         /* Pass 1: directories first (skip hidden/dot entries) */
         fr = f_opendir (&dir, target);
@@ -735,7 +768,7 @@ static int ZX_BrowserLoadFiles (const char *path) {
             Delay_Ms (80u);
             continue;
         }
-        while (1) {
+        for (;;) {
             fr = f_readdir (&dir, &fno);
             if ((fr != FR_OK) || (fno.fname[0] == '\0')) {
                 break;
@@ -746,15 +779,9 @@ static int ZX_BrowserLoadFiles (const char *path) {
             if ((fno.fattrib & AM_DIR) == 0u) {
                 continue;
             }
-            if (s_browser_count >= ZX_BROWSER_MAX_FILES) {
-                break;
+            if (total < 0xFFFEu) {
+                ++total;
             }
-            strncpy (s_browser_files[s_browser_count],
-                     (const char *)fno.fname,
-                     (size_t)(ZX_BROWSER_NAME_MAX - 1u));
-            s_browser_files[s_browser_count][ZX_BROWSER_NAME_MAX - 1u] = '\0';
-            s_browser_is_dir[s_browser_count] = 1u;
-            ++s_browser_count;
         }
         f_closedir (&dir);
         if (fr != FR_OK) {
@@ -768,7 +795,7 @@ static int ZX_BrowserLoadFiles (const char *path) {
             Delay_Ms (80u);
             continue;
         }
-        while (1) {
+        for (;;) {
             fr = f_readdir (&dir, &fno);
             if ((fr != FR_OK) || (fno.fname[0] == '\0')) {
                 break;
@@ -789,23 +816,27 @@ static int ZX_BrowserLoadFiles (const char *path) {
                     continue;
                 }
             }
-            if (s_browser_count >= ZX_BROWSER_MAX_FILES) {
-                break;
+            if (total < 0xFFFEu) {
+                ++total;
             }
-            strncpy (s_browser_files[s_browser_count],
-                     (const char *)fno.fname,
-                     (size_t)(ZX_BROWSER_NAME_MAX - 1u));
-            s_browser_files[s_browser_count][ZX_BROWSER_NAME_MAX - 1u] = '\0';
-            s_browser_is_dir[s_browser_count] = 0u;
-            ++s_browser_count;
         }
         f_closedir (&dir);
         if (fr == FR_OK) {
+            s_browser_count = total;
+            /* Remember the directory we're listing so ZX_BrowserGetEntry()
+               can re-open it. */
+            strncpy (s_browser_dir_path, target,
+                     (size_t)(ZX_BROWSER_PATH_MAX - 1u));
+            s_browser_dir_path[ZX_BROWSER_PATH_MAX - 1u] = '\0';
+            s_browser_dir_open = 0u;
             return 1;
         }
         Delay_Ms (80u);
     }
 
+    s_browser_count = 0u;
+    s_browser_dir_path[0] = '\0';
+    s_browser_dir_open = 0u;
     printf ("%s: scan failed for '%s' (fr=%d)\r\n",
             (s_browser_mode == ZX_BROWSER_MODE_TAP) ? "tapselect" : "z80select",
             target,
@@ -813,7 +844,151 @@ static int ZX_BrowserLoadFiles (const char *path) {
     return 0;
 }
 
-static int ZX_BrowserRender (const char *path, uint8_t selected);
+/* Resolve a directory-entry index (0..s_browser_count-1) to (name, is_dir)
+   by reading the directory forward from the start until we reach that index.
+   Results are cached in s_browser_cache_* so repeated lookups for the
+   current page are O(1) after the first miss.  Returns 1 on success, 0 on
+   I/O failure. */
+static int ZX_BrowserGetEntry (uint16_t index, char *out_name,
+                               uint8_t *out_is_dir) {
+    FILINFO fno;
+    FRESULT fr;
+    uint16_t skip;
+    uint8_t cache_slot;
+
+    if ((out_name == NULL) || (out_is_dir == NULL)) {
+        return 0;
+    }
+    if (index >= s_browser_count) {
+        out_name[0] = '\0';
+        *out_is_dir = 0u;
+        return 0;
+    }
+
+    /* Look in the per-page cache first. */
+    for (cache_slot = 0u; cache_slot < ZX_BROWSER_PAGE_ROWS; ++cache_slot) {
+        if ((s_browser_cache_valid[cache_slot] != 0u) &&
+            (s_browser_cache_idx[cache_slot] == index)) {
+            size_t n;
+            for (n = 0u; n < (size_t)(ZX_BROWSER_NAME_MAX - 1u); ++n) {
+                out_name[n] = s_browser_cache_name[cache_slot][n];
+                if (out_name[n] == '\0') {
+                    break;
+                }
+            }
+            out_name[n] = '\0';
+            *out_is_dir = s_browser_cache_is_dir[cache_slot];
+            return 1;
+        }
+    }
+
+    /* Cache miss.  Pick a slot to fill:
+       1. Prefer an empty (invalid) slot so we don't kick out a useful entry.
+       2. Otherwise, evict the slot holding the smallest index.  When paging
+          forward the smallest indices are the least recently used; when the
+          user pages backward the same strategy evicts rows we just left,
+          which is also the right behavior since the user's new focus is the
+          just-loaded page. */
+    {
+        uint8_t found_empty = 0u;
+        uint8_t victim = 0u;
+        uint16_t victim_idx = 0xFFFFu;
+        for (cache_slot = 0u; cache_slot < ZX_BROWSER_PAGE_ROWS; ++cache_slot) {
+            if (s_browser_cache_valid[cache_slot] == 0u) {
+                victim = cache_slot;
+                found_empty = 1u;
+                break;
+            }
+            if (s_browser_cache_idx[cache_slot] < victim_idx) {
+                victim_idx = s_browser_cache_idx[cache_slot];
+                victim = cache_slot;
+            }
+        }
+        cache_slot = victim;
+        (void)found_empty;
+    }
+
+    /* Open (or re-open) the directory and walk to `index`. */
+    fr = f_opendir (&s_browser_dir, s_browser_dir_path);
+    if (fr != FR_OK) {
+        out_name[0] = '\0';
+        *out_is_dir = 0u;
+        return 0;
+    }
+    s_browser_dir_open = 1u;
+
+    for (skip = 0u; skip <= index; ++skip) {
+        uint8_t is_dir_entry;
+        fr = f_readdir (&s_browser_dir, &fno);
+        if ((fr != FR_OK) || (fno.fname[0] == '\0')) {
+            s_browser_dir_open = 0u;
+            f_closedir (&s_browser_dir);
+            out_name[0] = '\0';
+            *out_is_dir = 0u;
+            return 0;
+        }
+        /* Skip entries the loader would have skipped. */
+        if (fno.fname[0] == '.') {
+            --skip;
+            continue;
+        }
+        is_dir_entry = (uint8_t)((fno.fattrib & AM_DIR) != 0u);
+        if (skip < index) {
+            if (is_dir_entry) {
+                /* Directories appear before files.  All directories come
+                   first in the listing, so a non-dir here at skip<index
+                   means we need to keep scanning for the matching-file
+                   position.  No correction needed. */
+            } else {
+                /* File: count only if it matches the active mode filter. */
+                if (s_browser_mode == ZX_BROWSER_MODE_TAP) {
+                    if (!ZX_HasTapExtension ((const char *)fno.fname) &&
+                        !ZX_HasTzxExtension ((const char *)fno.fname)) {
+                        --skip;
+                    }
+                } else {
+                    if (!ZX_HasZ80Extension ((const char *)fno.fname) &&
+                        !ZX_HasTapExtension ((const char *)fno.fname) &&
+                        !ZX_HasTzxExtension ((const char *)fno.fname) &&
+                        !ZX_HasRomExtension ((const char *)fno.fname)) {
+                        --skip;
+                    }
+                }
+            }
+        }
+        if (skip == index) {
+            size_t n;
+            for (n = 0u; n < (size_t)(ZX_BROWSER_NAME_MAX - 1u); ++n) {
+                out_name[n] = fno.fname[n];
+                if (out_name[n] == '\0') {
+                    break;
+                }
+            }
+            out_name[n] = '\0';
+            *out_is_dir = is_dir_entry;
+            /* Populate cache. */
+            s_browser_cache_idx[cache_slot] = index;
+            s_browser_cache_is_dir[cache_slot] = is_dir_entry;
+            s_browser_cache_valid[cache_slot] = 1u;
+            for (n = 0u; n < (size_t)(ZX_BROWSER_NAME_MAX - 1u); ++n) {
+                s_browser_cache_name[cache_slot][n] = out_name[n];
+                if (out_name[n] == '\0') {
+                    break;
+                }
+            }
+            s_browser_cache_name[cache_slot][n] = '\0';
+            return 1;
+        }
+    }
+
+    s_browser_dir_open = 0u;
+    f_closedir (&s_browser_dir);
+    out_name[0] = '\0';
+    *out_is_dir = 0u;
+    return 0;
+}
+
+static int ZX_BrowserRender (const char *path, uint16_t selected);
 
 static const char *ZX_Z80LoadErrorText (int rc) {
     switch (rc) {
@@ -838,6 +1013,13 @@ static void ZX_WaitAnyKey (void) {
         if (rc > 0) {
             return;
         }
+        /* ZX hardware reset cleared the screen.  Invalidate the diff cache
+         * and re-commit whatever screen was last rendered so the user sees
+         * the prompt again instead of a blank green border. */
+        if (ZX_HandleExternalResetIfAny ()) {
+            s_prev_valid = 0u;
+            (void)ZX_TermCommit();
+        }
         Delay_Ms (20u);
     }
 }
@@ -854,6 +1036,13 @@ static int ZX_WaitAnyKeyOrCancel0 (void) {
         }
         if (rc > 0) {
             return (key == '0') ? 0 : 1;
+        }
+        /* ZX hardware reset cleared the screen.  Invalidate the diff cache
+         * and re-commit whatever screen was last rendered (typically the
+         * TAPE READY prompt) so the user sees the prompt again. */
+        if (ZX_HandleExternalResetIfAny ()) {
+            s_prev_valid = 0u;
+            (void)ZX_TermCommit();
         }
         Delay_Ms (20u);
     }
@@ -1046,7 +1235,7 @@ static int ZX_BrowserShowRomLoading (const char *path) {
     return ZX_TermCommit();
 }
 
-static int ZX_BrowserRenderRetry (const char *path, uint8_t selected) {
+static int ZX_BrowserRenderRetry (const char *path, uint16_t selected) {
     uint8_t retry;
 
     for (retry = 0u; retry < ZX_BROWSER_RENDER_RETRIES; ++retry) {
@@ -1080,10 +1269,9 @@ static int ZX_BrowserBuildPath (char *out, size_t out_size, const char *dir, con
     return 1;
 }
 
-static int ZX_BrowserRender (const char *path, uint8_t selected) {
-    uint8_t page_start;
+static int ZX_BrowserRender (const char *path, uint16_t selected) {
+    uint16_t page_start;
     uint8_t row;
-    uint8_t i;
     uint8_t normal_attr = (uint8_t)((7u << 3) | 0u);
     uint8_t select_attr = (uint8_t)((0u << 3) | 7u);
     char line[ZX_TERM_COLS + 1u];
@@ -1092,7 +1280,7 @@ static int ZX_BrowserRender (const char *path, uint8_t selected) {
     ZX_TermModelWriteAt (0u, 0u, "RISKY SPECCY", normal_attr);
     ZX_TermModelWriteAt (0u, 14u, FIRMWARE_VERSION_STRING, normal_attr);
     ZX_TermModelWriteAt (1u, 0u, ((path != NULL) && (path[0] != '\0')) ? path : "/", normal_attr);
-    ZX_TermModelWriteAt (2u, 0u, "Q/A MOVE  O/P PAGE", normal_attr);
+    ZX_TermModelWriteAt (2u, 0u, "Q/A MOVE  O/P PAGE  W/E 90", normal_attr);
     if (s_browser_stack_depth > 0u) {
         ZX_TermModelWriteAt (3u, 0u, "ENTER OPEN  0 BACK", normal_attr);
     } else {
@@ -1106,9 +1294,9 @@ static int ZX_BrowserRender (const char *path, uint8_t selected) {
         return ZX_TermCommit();
     }
 
-    page_start = (uint8_t)((selected / ZX_BROWSER_PAGE_ROWS) * ZX_BROWSER_PAGE_ROWS);
+    page_start = (uint16_t)((selected / ZX_BROWSER_PAGE_ROWS) * ZX_BROWSER_PAGE_ROWS);
     for (row = 0u; row < ZX_BROWSER_PAGE_ROWS; ++row) {
-        uint8_t index = (uint8_t)(page_start + row);
+        uint16_t index = (uint16_t)page_start + (uint16_t)row;
         uint8_t attr = (index == selected) ? select_attr : normal_attr;
         ZX_TermModelFillRow ((uint8_t)(5u + row), attr);
         if (index >= s_browser_count) {
@@ -1118,16 +1306,24 @@ static int ZX_BrowserRender (const char *path, uint8_t selected) {
         memset (line, ' ', sizeof (line));
         line[ZX_TERM_COLS] = '\0';
         line[0] = (index == selected) ? '>' : ' ';
-        if (s_browser_is_dir[index] != 0u) {
-            /* Show directories as [NAME] */
-            line[1u] = '[';
-            for (i = 0u; (i < (uint8_t)(ZX_TERM_COLS - 4u)) && (s_browser_files[index][i] != '\0'); ++i) {
-                line[2u + i] = s_browser_files[index][i];
-            }
-            line[2u + i] = ']';
-        } else {
-            for (i = 0u; (i < (uint8_t)(ZX_TERM_COLS - 2u)) && (s_browser_files[index][i] != '\0'); ++i) {
-                line[1u + i] = s_browser_files[index][i];
+
+        {
+            char entry_name[ZX_BROWSER_NAME_MAX];
+            uint8_t entry_is_dir;
+            if (ZX_BrowserGetEntry (index, entry_name, &entry_is_dir)) {
+                uint8_t i;
+                if (entry_is_dir != 0u) {
+                    /* Show directories as [NAME] */
+                    line[1u] = '[';
+                    for (i = 0u; (i < (uint8_t)(ZX_TERM_COLS - 4u)) && (entry_name[i] != '\0'); ++i) {
+                        line[2u + i] = entry_name[i];
+                    }
+                    line[2u + i] = ']';
+                } else {
+                    for (i = 0u; (i < (uint8_t)(ZX_TERM_COLS - 2u)) && (entry_name[i] != '\0'); ++i) {
+                        line[1u + i] = entry_name[i];
+                    }
+                }
             }
         }
         ZX_TermModelWriteAt ((uint8_t)(5u + row), 0u, line, attr);
@@ -1198,6 +1394,14 @@ void ZX_TerminalWaitUsbDriveReady (void) {
             int rc = ZX_KeyPoll (&key);
             if (rc < 0) { break; }
             if ((rc > 0) && ZX_IsEnterKey (key)) { break; }
+            /* ZX hardware reset cleared the prompt screen.  Invalidate the
+             * diff cache and redraw it so the user sees the prompt again. */
+            if (ZX_HandleExternalResetIfAny ()) {
+                s_prev_valid = 0u;
+                if (!ZX_TermCommit()) {
+                    printf ("WARN: USB prompt redraw after ZX reset timeout\r\n");
+                }
+            }
             Delay_Ms (20u);
         }
 
@@ -1407,7 +1611,7 @@ void ZX_TerminalCommandTermWrite (char *firstToken) {
 }
 
 int ZX_TerminalCommandZ80Select (const char *path) {
-    uint8_t selected = 0u;
+    uint16_t selected = 0u;
     uint8_t suppress_enter_loops = 0u;
     char full_path[ZX_BROWSER_PATH_MAX];
     char cur_path[ZX_BROWSER_PATH_MAX];
@@ -1453,6 +1657,17 @@ int ZX_TerminalCommandZ80Select (const char *path) {
             if (suppress_enter_loops > 0u) {
                 --suppress_enter_loops;
             }
+            /* Detect a ZX hardware reset (PC6 falling edge).  zxprog clears
+             * 0x4000-0xFFFF on startup, which wipes the screen we pushed;
+             * invalidate the diff cache so the next render pushes the full
+             * 6144 + 768 bytes, then redraw the current page so the browser
+             * comes back instead of staying blank until the user types. */
+            if (ZX_HandleExternalResetIfAny ()) {
+                s_prev_valid = 0u;
+                if (!ZX_BrowserRenderRetry (cur_path, selected)) {
+                    printf ("WARN: z80select redraw after ZX reset timeout\r\n");
+                }
+            }
             Delay_Ms (20u);
             continue;
         }
@@ -1479,7 +1694,7 @@ int ZX_TerminalCommandZ80Select (const char *path) {
         }
         if ((key == 'o') || (key == 'O')) {
             if (selected >= ZX_BROWSER_PAGE_ROWS) {
-                selected = (uint8_t)(selected - ZX_BROWSER_PAGE_ROWS);
+                selected = (uint16_t)(selected - ZX_BROWSER_PAGE_ROWS);
             } else {
                 selected = 0u;
             }
@@ -1494,7 +1709,33 @@ int ZX_TerminalCommandZ80Select (const char *path) {
             if (next >= s_browser_count) {
                 next = (s_browser_count == 0u) ? 0u : (uint16_t)(s_browser_count - 1u);
             }
-            selected = (uint8_t)next;
+            selected = next;
+            if (!ZX_BrowserRenderRetry (cur_path, selected)) {
+                printf ("WARN: z80select redraw timeout\r\n");
+            }
+            suppress_enter_loops = 20u;
+            continue;
+        }
+        if ((key == 'w') || (key == 'W')) {
+            /* Jump back by ZX_BROWSER_JUMP_STEP (5 pages). */
+            if (selected >= ZX_BROWSER_JUMP_STEP) {
+                selected = (uint16_t)(selected - ZX_BROWSER_JUMP_STEP);
+            } else {
+                selected = 0u;
+            }
+            if (!ZX_BrowserRenderRetry (cur_path, selected)) {
+                printf ("WARN: z80select redraw timeout\r\n");
+            }
+            suppress_enter_loops = 20u;
+            continue;
+        }
+        if ((key == 'e') || (key == 'E')) {
+            /* Jump forward by ZX_BROWSER_JUMP_STEP (5 pages). */
+            uint16_t next = (uint16_t)selected + ZX_BROWSER_JUMP_STEP;
+            if (next >= s_browser_count) {
+                next = (s_browser_count == 0u) ? 0u : (uint16_t)(s_browser_count - 1u);
+            }
+            selected = next;
             if (!ZX_BrowserRenderRetry (cur_path, selected)) {
                 printf ("WARN: z80select redraw timeout\r\n");
             }
@@ -1523,106 +1764,123 @@ int ZX_TerminalCommandZ80Select (const char *path) {
             if (suppress_enter_loops > 0u) {
                 continue;
             }
-            if ((s_browser_count > 0u) && (s_browser_is_dir[selected] != 0u)) {
-                /* Navigate into directory */
-                if (s_browser_stack_depth < 3u) {
-                    char new_path[ZX_BROWSER_PATH_MAX];
-                    if (!ZX_BrowserBuildPath (new_path, sizeof (new_path),
-                                              cur_path, s_browser_files[selected])) {
-                        printf ("z80select: path too long\r\n");
+            {
+                char entry_name[ZX_BROWSER_NAME_MAX];
+                uint8_t entry_is_dir;
+                if (!ZX_BrowserGetEntry ((uint16_t)selected, entry_name, &entry_is_dir)) {
+                    printf ("z80select: cannot resolve entry %u\r\n",
+                            (unsigned)selected);
+                    continue;
+                }
+                if (entry_is_dir != 0u) {
+                    /* Navigate into directory */
+                    if (s_browser_stack_depth < 3u) {
+                        char new_path[ZX_BROWSER_PATH_MAX];
+                        if (!ZX_BrowserBuildPath (new_path, sizeof (new_path),
+                                                  cur_path, entry_name)) {
+                            printf ("z80select: path too long\r\n");
+                            continue;
+                        }
+                        strncpy (s_browser_path_stack[s_browser_stack_depth],
+                                 cur_path,
+                                 (size_t)(ZX_BROWSER_PATH_MAX - 1u));
+                        s_browser_path_stack[s_browser_stack_depth][ZX_BROWSER_PATH_MAX - 1u] = '\0';
+                        s_browser_selected_stack[s_browser_stack_depth] = selected;
+                        ++s_browser_stack_depth;
+                        strncpy (cur_path, new_path, (size_t)(ZX_BROWSER_PATH_MAX - 1u));
+                        cur_path[ZX_BROWSER_PATH_MAX - 1u] = '\0';
+                        selected = 0u;
+                        if (!ZX_BrowserLoadFiles (cur_path)) {
+                            goto done;
+                        }
+                        if (!ZX_BrowserRenderRetry (cur_path, selected)) {
+                            printf ("WARN: z80select redraw timeout\r\n");
+                        }
+                    } else {
+                        printf ("z80select: max folder depth reached\r\n");
+                    }
+                    suppress_enter_loops = 20u;
+                    continue;
+                }
+                if (!ZX_BrowserBuildPath (full_path, sizeof (full_path), cur_path, entry_name)) {
+                    printf ("z80select: path too long, cannot open\r\n");
+                    continue;
+                }
+            if (ZX_HasRomExtension (entry_name)) {
+                    /* Interface 2 cartridge ROM: show info page, wait for ENTER to
+                       confirm or 0 (any non-ENTER key) to cancel back to the
+                       browser.  On confirm: show a brief LOADING page and switch
+                       the cart engine into pure-ROM mode.  Board then acts as a
+                       16 KB ROM cart until hardware reset. */
+                    FILINFO rfi;
+                    uint32_t rsize = 0u;
+                    int rconfirmed = 0;
+
+                    if (f_stat (full_path, &rfi) == FR_OK) {
+                        rsize = (uint32_t)rfi.fsize;
+                    }
+
+                    if (!ZX_BrowserShowRomInfo (full_path, rsize)) {
+                        printf ("WARN: rom info draw timeout\r\n");
+                    }
+                    for (;;) {
+                        uint8_t ikey = 0u;
+                        int krc = ZX_KeyPoll (&ikey);
+                        if (krc < 0) { break; }
+                        if (krc > 0) {
+                            if (ZX_IsEnterKey (ikey)) { rconfirmed = 1; }
+                            break;
+                        }
+                        /* ZX hardware reset wiped the ROM info screen —
+                         * invalidate the diff cache and redraw it so the
+                         * user sees what they were confirming. */
+                        if (ZX_HandleExternalResetIfAny ()) {
+                            s_prev_valid = 0u;
+                            if (!ZX_BrowserShowRomInfo (full_path, rsize)) {
+                                printf ("WARN: rom info redraw after ZX reset timeout\r\n");
+                            }
+                        }
+                        Delay_Ms (20u);
+                    }
+                    if (!rconfirmed) {
+                        if (!ZX_BrowserRenderRetry (cur_path, selected)) {
+                            printf ("WARN: z80select redraw timeout\r\n");
+                        }
+                        suppress_enter_loops = 20u;
                         continue;
                     }
-                    strncpy (s_browser_path_stack[s_browser_stack_depth],
-                             cur_path,
-                             (size_t)(ZX_BROWSER_PATH_MAX - 1u));
-                    s_browser_path_stack[s_browser_stack_depth][ZX_BROWSER_PATH_MAX - 1u] = '\0';
-                    s_browser_selected_stack[s_browser_stack_depth] = selected;
-                    ++s_browser_stack_depth;
-                    strncpy (cur_path, new_path, (size_t)(ZX_BROWSER_PATH_MAX - 1u));
-                    cur_path[ZX_BROWSER_PATH_MAX - 1u] = '\0';
-                    selected = 0u;
-                    if (!ZX_BrowserLoadFiles (cur_path)) {
-                        goto done;
-                    }
-                    if (!ZX_BrowserRenderRetry (cur_path, selected)) {
-                        printf ("WARN: z80select redraw timeout\r\n");
-                    }
-                } else {
-                    printf ("z80select: max folder depth reached\r\n");
-                }
-                suppress_enter_loops = 20u;
-                continue;
-            }
-            if (!ZX_BrowserBuildPath (full_path, sizeof (full_path), cur_path, s_browser_files[selected])) {
-                printf ("z80select: path too long, cannot open\r\n");
-                continue;
-            }
-            if (ZX_HasRomExtension (s_browser_files[selected])) {
-                /* Interface 2 cartridge ROM: show info page, wait for ENTER to
-                   confirm or 0 (any non-ENTER key) to cancel back to the
-                   browser.  On confirm: show a brief LOADING page and switch
-                   the cart engine into pure-ROM mode.  Board then acts as a
-                   16 KB ROM cart until hardware reset. */
-                FILINFO rfi;
-                uint32_t rsize = 0u;
-                int rconfirmed = 0;
 
-                if (f_stat (full_path, &rfi) == FR_OK) {
-                    rsize = (uint32_t)rfi.fsize;
-                }
-
-                if (!ZX_BrowserShowRomInfo (full_path, rsize)) {
-                    printf ("WARN: rom info draw timeout\r\n");
-                }
-                for (;;) {
-                    uint8_t ikey = 0u;
-                    int krc = ZX_KeyPoll (&ikey);
-                    if (krc < 0) { break; }
-                    if (krc > 0) {
-                        if (ZX_IsEnterKey (ikey)) { rconfirmed = 1; }
-                        break;
+                    /* Show LOADING page (still in launcher mode — cart shadow RAM
+                       at 0x3000+ is what backs the ZX display).  Then drop the
+                       draw suspension and run the actual swap. */
+                    if (!ZX_BrowserShowRomLoading (full_path)) {
+                        printf ("WARN: rom loading draw timeout\r\n");
                     }
-                    Delay_Ms (20u);
-                }
-                if (!rconfirmed) {
-                    if (!ZX_BrowserRenderRetry (cur_path, selected)) {
-                        printf ("WARN: z80select redraw timeout\r\n");
-                    }
-                    suppress_enter_loops = 20u;
-                    continue;
-                }
 
-                /* Show LOADING page (still in launcher mode — cart shadow RAM
-                   at 0x3000+ is what backs the ZX display).  Then drop the
-                   draw suspension and run the actual swap. */
-                if (!ZX_BrowserShowRomLoading (full_path)) {
-                    printf ("WARN: rom loading draw timeout\r\n");
-                }
-
-                s_selector_font_mode = 0u;
-                if (draw_suspended) {
-                    ZX_TerminalMarkBridgeDirty();
-                    ZX_CartDrawResume();
-                    draw_suspended = 0;
-                }
-                if (!IF2_LoadRomFromFile (full_path)) {
-                    printf ("z80select: if2 load failed for %s\r\n", full_path);
-                    /* Re-suspend draw and redraw the browser so the user can retry. */
-                    s_selector_font_mode = 1u;
-                    ZX_CartDrawSuspend();
-                    Delay_Ms (50u);
-                    draw_suspended = 1;
-                    if (!ZX_BrowserRenderRetry (cur_path, selected)) {
-                        printf ("WARN: z80select redraw timeout\r\n");
+                    s_selector_font_mode = 0u;
+                    if (draw_suspended) {
+                        ZX_TerminalMarkBridgeDirty();
+                        ZX_CartDrawResume();
+                        draw_suspended = 0;
                     }
-                    suppress_enter_loops = 20u;
-                    continue;
+                    if (!IF2_LoadRomFromFile (full_path)) {
+                        printf ("z80select: if2 load failed for %s\r\n", full_path);
+                        /* Re-suspend draw and redraw the browser so the user can retry. */
+                        s_selector_font_mode = 1u;
+                        ZX_CartDrawSuspend();
+                        Delay_Ms (50u);
+                        draw_suspended = 1;
+                        if (!ZX_BrowserRenderRetry (cur_path, selected)) {
+                            printf ("WARN: z80select redraw timeout\r\n");
+                        }
+                        suppress_enter_loops = 20u;
+                        continue;
+                    }
+                    launched = 1;
+                    goto done;
                 }
-                launched = 1;
-                goto done;
-            }
-            if (ZX_HasTapExtension (s_browser_files[selected]) ||
-                ZX_HasTzxExtension (s_browser_files[selected])) {
+            if (ZX_HasTapExtension (entry_name) ||
+                ZX_HasTzxExtension (entry_name)) {
                 TAP_Player_Stop();
                 if (!TAP_Player_Load (full_path)) {
                     printf ("z80select: tap prepare failed for %s\r\n", full_path);
@@ -1680,6 +1938,15 @@ int ZX_TerminalCommandZ80Select (const char *path) {
                                 if (ZX_IsEnterKey (ikey)) { confirmed = 1; }
                                 break;
                             }
+                            /* ZX hardware reset wiped the info screen —
+                             * invalidate the diff cache and redraw it so
+                             * the user sees what they were confirming. */
+                            if (ZX_HandleExternalResetIfAny ()) {
+                                s_prev_valid = 0u;
+                                if (!ZX_BrowserShowZ80Info (full_path, &fi)) {
+                                    printf ("WARN: z80select info redraw after ZX reset timeout\r\n");
+                                }
+                            }
                             Delay_Ms (20u);
                         }
                         if (!confirmed) {
@@ -1718,6 +1985,7 @@ int ZX_TerminalCommandZ80Select (const char *path) {
                 }
             }
             continue;
+            }   /* close scope that contains entry_name / entry_is_dir */
         }
     }
 
@@ -1731,7 +1999,7 @@ done:
 }
 
 void ZX_TerminalCommandTapSelect (const char *path) {
-    uint8_t selected = 0u;
+    uint16_t selected = 0u;
     uint8_t suppress_enter_loops = 0u;
     char full_path[ZX_BROWSER_PATH_MAX];
     char cur_path[ZX_BROWSER_PATH_MAX];
@@ -1777,6 +2045,17 @@ void ZX_TerminalCommandTapSelect (const char *path) {
             if (suppress_enter_loops > 0u) {
                 --suppress_enter_loops;
             }
+            /* Detect a ZX hardware reset (PC6 falling edge).  zxprog clears
+             * 0x4000-0xFFFF on startup, which wipes the screen we pushed;
+             * invalidate the diff cache so the next render pushes the full
+             * 6144 + 768 bytes, then redraw the current page so the browser
+             * comes back instead of staying blank until the user types. */
+            if (ZX_HandleExternalResetIfAny ()) {
+                s_prev_valid = 0u;
+                if (!ZX_BrowserRenderRetry (cur_path, selected)) {
+                    printf ("WARN: tapselect redraw after ZX reset timeout\r\n");
+                }
+            }
             Delay_Ms (20u);
             continue;
         }
@@ -1803,7 +2082,7 @@ void ZX_TerminalCommandTapSelect (const char *path) {
         }
         if ((key == 'o') || (key == 'O')) {
             if (selected >= ZX_BROWSER_PAGE_ROWS) {
-                selected = (uint8_t)(selected - ZX_BROWSER_PAGE_ROWS);
+                selected = (uint16_t)(selected - ZX_BROWSER_PAGE_ROWS);
             } else {
                 selected = 0u;
             }
@@ -1818,7 +2097,33 @@ void ZX_TerminalCommandTapSelect (const char *path) {
             if (next >= s_browser_count) {
                 next = (s_browser_count == 0u) ? 0u : (uint16_t)(s_browser_count - 1u);
             }
-            selected = (uint8_t)next;
+            selected = next;
+            if (!ZX_BrowserRenderRetry (cur_path, selected)) {
+                printf ("WARN: tapselect redraw timeout\r\n");
+            }
+            suppress_enter_loops = 20u;
+            continue;
+        }
+        if ((key == 'w') || (key == 'W')) {
+            /* Jump back by ZX_BROWSER_JUMP_STEP (5 pages). */
+            if (selected >= ZX_BROWSER_JUMP_STEP) {
+                selected = (uint16_t)(selected - ZX_BROWSER_JUMP_STEP);
+            } else {
+                selected = 0u;
+            }
+            if (!ZX_BrowserRenderRetry (cur_path, selected)) {
+                printf ("WARN: tapselect redraw timeout\r\n");
+            }
+            suppress_enter_loops = 20u;
+            continue;
+        }
+        if ((key == 'e') || (key == 'E')) {
+            /* Jump forward by ZX_BROWSER_JUMP_STEP (5 pages). */
+            uint16_t next = (uint16_t)selected + ZX_BROWSER_JUMP_STEP;
+            if (next >= s_browser_count) {
+                next = (s_browser_count == 0u) ? 0u : (uint16_t)(s_browser_count - 1u);
+            }
+            selected = next;
             if (!ZX_BrowserRenderRetry (cur_path, selected)) {
                 printf ("WARN: tapselect redraw timeout\r\n");
             }
@@ -1849,38 +2154,47 @@ void ZX_TerminalCommandTapSelect (const char *path) {
         if (suppress_enter_loops > 0u) {
             continue;
         }
-        if ((s_browser_count > 0u) && (s_browser_is_dir[selected] != 0u)) {
-            if (s_browser_stack_depth < 3u) {
-                char new_path[ZX_BROWSER_PATH_MAX];
-                if (!ZX_BrowserBuildPath (new_path, sizeof (new_path),
-                                          cur_path, s_browser_files[selected])) {
-                    printf ("tapselect: path too long\r\n");
-                    continue;
-                }
-                strncpy (s_browser_path_stack[s_browser_stack_depth],
-                         cur_path,
-                         (size_t)(ZX_BROWSER_PATH_MAX - 1u));
-                s_browser_path_stack[s_browser_stack_depth][ZX_BROWSER_PATH_MAX - 1u] = '\0';
-                s_browser_selected_stack[s_browser_stack_depth] = selected;
-                ++s_browser_stack_depth;
-                strncpy (cur_path, new_path, (size_t)(ZX_BROWSER_PATH_MAX - 1u));
-                cur_path[ZX_BROWSER_PATH_MAX - 1u] = '\0';
-                selected = 0u;
-                if (!ZX_BrowserLoadFiles (cur_path)) {
-                    goto done;
-                }
-                if (!ZX_BrowserRenderRetry (cur_path, selected)) {
-                    printf ("WARN: tapselect redraw timeout\r\n");
-                }
-            } else {
-                printf ("tapselect: max folder depth reached\r\n");
+        {
+            char entry_name[ZX_BROWSER_NAME_MAX];
+            uint8_t entry_is_dir;
+            if (!ZX_BrowserGetEntry ((uint16_t)selected, entry_name, &entry_is_dir)) {
+                printf ("tapselect: cannot resolve entry %u\r\n",
+                        (unsigned)selected);
+                continue;
             }
-            suppress_enter_loops = 20u;
-            continue;
-        }
-        if (!ZX_BrowserBuildPath (full_path, sizeof (full_path), cur_path, s_browser_files[selected])) {
-            printf ("tapselect: path too long, cannot queue\r\n");
-            continue;
+            if (entry_is_dir != 0u) {
+                if (s_browser_stack_depth < 3u) {
+                    char new_path[ZX_BROWSER_PATH_MAX];
+                    if (!ZX_BrowserBuildPath (new_path, sizeof (new_path),
+                                              cur_path, entry_name)) {
+                        printf ("tapselect: path too long\r\n");
+                        continue;
+                    }
+                    strncpy (s_browser_path_stack[s_browser_stack_depth],
+                             cur_path,
+                             (size_t)(ZX_BROWSER_PATH_MAX - 1u));
+                    s_browser_path_stack[s_browser_stack_depth][ZX_BROWSER_PATH_MAX - 1u] = '\0';
+                    s_browser_selected_stack[s_browser_stack_depth] = selected;
+                    ++s_browser_stack_depth;
+                    strncpy (cur_path, new_path, (size_t)(ZX_BROWSER_PATH_MAX - 1u));
+                    cur_path[ZX_BROWSER_PATH_MAX - 1u] = '\0';
+                    selected = 0u;
+                    if (!ZX_BrowserLoadFiles (cur_path)) {
+                        goto done;
+                    }
+                    if (!ZX_BrowserRenderRetry (cur_path, selected)) {
+                        printf ("WARN: tapselect redraw timeout\r\n");
+                    }
+                } else {
+                    printf ("tapselect: max folder depth reached\r\n");
+                }
+                suppress_enter_loops = 20u;
+                continue;
+            }
+            if (!ZX_BrowserBuildPath (full_path, sizeof (full_path), cur_path, entry_name)) {
+                printf ("tapselect: path too long, cannot queue\r\n");
+                continue;
+            }
         }
 
         TAP_Player_Stop();
