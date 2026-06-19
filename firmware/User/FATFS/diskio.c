@@ -57,6 +57,9 @@ DRESULT disk_read (
     UINT count    /* Number of sectors to read */
 ) {
 
+    if (!USBH_IsReady ()) {
+        return RES_NOTRDY;
+    }
     for (UINT i = 0; i < count; i++) {
         if (usb_scsi_read_sector (sector + i, buff + i * 512, block_size) != 0)
             return RES_ERROR;
@@ -75,6 +78,9 @@ DRESULT disk_write (
     UINT count          /* Number of sectors to write */
 ) {
     if (block_size != 512u) {
+        return RES_NOTRDY;
+    }
+    if (!USBH_IsReady ()) {
         return RES_NOTRDY;
     }
 

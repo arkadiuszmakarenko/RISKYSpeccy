@@ -90,6 +90,12 @@ static char s_browser_path_stack[3][ZX_BROWSER_PATH_MAX];
 static uint16_t s_browser_selected_stack[3];
 static uint8_t s_browser_stack_depth = 0u;
 
+/* Set to 1 by ZX_TerminalCommand*Select when the USB host stack
+ * reports the drive has gone away during a blocking keyboard wait.
+ * The main loop checks this after the browser returns and re-runs
+ * ZX_TerminalWaitUsbDriveReady if it is set. */
+static volatile uint8_t s_usb_lost = 0u;
+
 #define ZX_BROWSER_MODE_Z80 0u
 #define ZX_BROWSER_MODE_TAP 1u
 
@@ -1013,6 +1019,10 @@ static void ZX_WaitAnyKey (void) {
         if (rc > 0) {
             return;
         }
+        ZX_TerminalPollUsb ();
+        if (s_usb_lost) {
+            return;
+        }
         /* ZX hardware reset cleared the screen.  Invalidate the diff cache
          * and re-commit whatever screen was last rendered so the user sees
          * the prompt again instead of a blank green border. */
@@ -1036,6 +1046,10 @@ static int ZX_WaitAnyKeyOrCancel0 (void) {
         }
         if (rc > 0) {
             return (key == '0') ? 0 : 1;
+        }
+        ZX_TerminalPollUsb ();
+        if (s_usb_lost) {
+            return -1;
         }
         /* ZX hardware reset cleared the screen.  Invalidate the diff cache
          * and re-commit whatever screen was last rendered (typically the
@@ -1654,6 +1668,15 @@ int ZX_TerminalCommandZ80Select (const char *path) {
             goto done;
         }
         if (rc == 0) {
+            /* While the user isn't pressing keys, poll USB so a
+             * disconnect is detected within one keyboard poll period
+             * instead of after the user eventually presses something. */
+            ZX_TerminalPollUsb ();
+            if (s_usb_lost) {
+                printf ("z80select: USB drive gone, aborting browser\r\n");
+                launched = 0;
+                goto done;
+            }
             if (suppress_enter_loops > 0u) {
                 --suppress_enter_loops;
             }
@@ -1831,6 +1854,8 @@ int ZX_TerminalCommandZ80Select (const char *path) {
                             if (ZX_IsEnterKey (ikey)) { rconfirmed = 1; }
                             break;
                         }
+                        ZX_TerminalPollUsb ();
+                        if (s_usb_lost) { break; }
                         /* ZX hardware reset wiped the ROM info screen —
                          * invalidate the diff cache and redraw it so the
                          * user sees what they were confirming. */
@@ -1843,6 +1868,7 @@ int ZX_TerminalCommandZ80Select (const char *path) {
                         Delay_Ms (20u);
                     }
                     if (!rconfirmed) {
+                        if (s_usb_lost) { launched = 0; goto done; }
                         if (!ZX_BrowserRenderRetry (cur_path, selected)) {
                             printf ("WARN: z80select redraw timeout\r\n");
                         }
@@ -1938,6 +1964,8 @@ int ZX_TerminalCommandZ80Select (const char *path) {
                                 if (ZX_IsEnterKey (ikey)) { confirmed = 1; }
                                 break;
                             }
+                            ZX_TerminalPollUsb ();
+                            if (s_usb_lost) { break; }
                             /* ZX hardware reset wiped the info screen —
                              * invalidate the diff cache and redraw it so
                              * the user sees what they were confirming. */
@@ -1950,6 +1978,7 @@ int ZX_TerminalCommandZ80Select (const char *path) {
                             Delay_Ms (20u);
                         }
                         if (!confirmed) {
+                            if (s_usb_lost) { launched = 0; goto done; }
                             if (!ZX_BrowserRenderRetry (cur_path, selected)) {
                                 printf ("WARN: z80select redraw timeout\r\n");
                             }
@@ -2042,6 +2071,12 @@ void ZX_TerminalCommandTapSelect (const char *path) {
             goto done;
         }
         if (rc == 0) {
+            ZX_TerminalPollUsb ();
+            if (s_usb_lost) {
+                printf ("tapselect: USB drive gone, aborting browser\r\n");
+                go_to_basic = 0;
+                goto done;
+            }
             if (suppress_enter_loops > 0u) {
                 --suppress_enter_loops;
             }
@@ -2257,4 +2292,29 @@ const char *ZX_TerminalPendingTapSelection (void) {
 
 void ZX_TerminalClearPendingTapSelection (void) {
     s_tapselect_pending[0] = '\0';
+}
+
+/*----------------------------------------------------------------------
+ * USB-lost signalling
+ *
+ * The blocking keyboard loops inside the file browser can't easily
+ * jump back to the main loop on their own, so they call
+ * ZX_TerminalPollUsb() each time the ZX keyboard has no input
+ * available.  If the host stack reports the drive is gone we set
+ * s_usb_lost and the browser returns to the main loop, which then
+ * re-runs ZX_TerminalWaitUsbDriveReady().
+ *----------------------------------------------------------------------*/
+uint8_t ZX_TerminalUsbLost (void) {
+    return s_usb_lost;
+}
+
+void ZX_TerminalClearUsbLost (void) {
+    s_usb_lost = 0u;
+}
+
+void ZX_TerminalPollUsb (void) {
+    if (s_usb_lost) return;            /* sticky until cleared */
+    if (!USBH_IsReady ()) {
+        s_usb_lost = 1u;
+    }
 }

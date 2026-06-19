@@ -1,5 +1,15 @@
 #include "usb_disk.h"
 
+/* LED helpers — PA8 is open-drain, active-low.
+ * Driving LOW  = LED ON.
+ * Releasing    = LED OFF (line floats high via pull-up). */
+static inline void led_flash_on  (void) { GPIOA->BCR  = GPIO_Pin_8; }
+static inline void led_flash_off (void) { GPIOA->BSHR = GPIO_Pin_8; }
+
+/* Track connection state across polls so we can detect a real disconnect
+ * (VBUS gone) even when the host SIE's INT_FG detect flag never re-fires. */
+static uint8_t s_usb_attached_prev = 0;
+
 /* Variable */
 __attribute__ ((aligned (4))) uint8_t Com_Buffer[DEF_COM_BUF_LEN];  // even address , used for host enumcation and udisk operation
 __attribute__ ((aligned (4))) uint8_t DevDesc_Buf[18];              // Device Descriptor Buffer
@@ -128,6 +138,19 @@ void USB_Initialization (void) {
     USBFS_Host_Init (ENABLE);
     memset (&RootHubDev[DEF_USB_PORT_FS].bStatus, 0, sizeof (struct _ROOT_HUB_DEVICE));
     memset (&HostCtl[DEF_USB_PORT_FS].InterfaceNum, 0, sizeof (struct __HOST_CTL));
+    s_usb_attached_prev = 0;
+    led_flash_off ();
+}
+
+/* Cheap predicate the disk layer can call before issuing SCSI I/O.
+ * Combines a status check with a fresh read of the attach bit, so a
+ * disconnect that happened between two USBH_PreDeal() calls is
+ * noticed immediately. */
+uint8_t USBH_IsReady (void) {
+    uint8_t usb_port = DEF_USB_PORT_FS;
+    if (RootHubDev[usb_port].bStatus != ROOT_DEV_SUCCESS) return 0;
+    if ((USBFSH->MIS_ST & USBFS_UMS_DEV_ATTACH) == 0) return 0;
+    return 1;
 }
 
 /*********************************************************************
@@ -334,6 +357,21 @@ uint8_t USBH_PreDeal (void) {
         ret = ROOT_DEV_CONNECTED;
     }
 
+    /*
+     * If we previously had a successful enumeration but the device has
+     * physically dropped off the bus (VBUS gone), the SIE's INT_FG detect
+     * flag may never re-fire after the first read. Force a disconnect
+     * transition so the LED is cleared and state is reset.
+     */
+    if ((RootHubDev[usb_port].bStatus == ROOT_DEV_SUCCESS) && !hw_attached) {
+        s_usb_attached_prev = 0;
+        index = RootHubDev[usb_port].DeviceIndex;
+        memset (&RootHubDev[usb_port].bStatus, 0, sizeof (struct _ROOT_HUB_DEVICE));
+        memset (&HostCtl[index].InterfaceNum, 0, sizeof (struct __HOST_CTL));
+        led_flash_off ();
+        return DEF_ERR_DETECT;
+    }
+
     if (ret == ROOT_DEV_CONNECTED) {
         // Only enumerate if not already enumerated
         if (RootHubDev[usb_port].bStatus != ROOT_DEV_SUCCESS) {
@@ -344,24 +382,31 @@ uint8_t USBH_PreDeal (void) {
             ret = USBH_EnumRootDevice (usb_port);
             if (ret == ERR_SUCCESS) {
                 RootHubDev[usb_port].bStatus = ROOT_DEV_SUCCESS;
+                s_usb_attached_prev = 1;
+                led_flash_on ();   /* LEDFLASH on: USB enumerated (active-low) */
                 return DEF_SUCCESS;
             } else {
                 RootHubDev[usb_port].bStatus = ROOT_DEV_FAILED;
+                s_usb_attached_prev = 0;
+                led_flash_off ();
                 return DEF_ERR_ENUM;
             }
         } else {
-
+            s_usb_attached_prev = hw_attached;
             return DEF_SUCCESS;
         }
     } else if (ret == ROOT_DEV_DISCONNECT) {
         //  Clear parameters
+        s_usb_attached_prev = 0;
         index = RootHubDev[usb_port].DeviceIndex;
         memset (&RootHubDev[usb_port].bStatus, 0, sizeof (struct _ROOT_HUB_DEVICE));
         memset (&HostCtl[index].InterfaceNum, 0, sizeof (struct __HOST_CTL));
+        led_flash_off ();   /* LEDFLASH off: USB disconnected (active-low) */
         return DEF_ERR_DETECT;
     }
 
     // No change
+    s_usb_attached_prev = hw_attached;
     return DEF_DEFAULT;
 }
 
@@ -372,6 +417,8 @@ void ClearUSB() {
     index = RootHubDev[usb_port].DeviceIndex;
     memset (&RootHubDev[usb_port].bStatus, 0, sizeof (struct _ROOT_HUB_DEVICE));
     memset (&HostCtl[index].InterfaceNum, 0, sizeof (struct __HOST_CTL));
+    s_usb_attached_prev = 0;
+    led_flash_off ();
 }
 
 // (Removed test helper: TEST UNIT READY)

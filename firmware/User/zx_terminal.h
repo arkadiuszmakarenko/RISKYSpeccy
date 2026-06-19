@@ -20,4 +20,12 @@ const char *ZX_TerminalPendingTapSelection (void);
 void ZX_TerminalClearPendingTapSelection (void);
 void ZX_TerminalMarkBridgeDirty (void);
 
+/* USB-lost signalling: the blocking browser loops call
+ * ZX_TerminalPollUsb() each iteration; if the host stack reports the
+ * drive gone, ZX_TerminalUsbLost() returns 1 and the browser returns
+ * to the main loop.  ZX_TerminalClearUsbLost() resets the latch. */
+uint8_t ZX_TerminalUsbLost (void);
+void ZX_TerminalClearUsbLost (void);
+void ZX_TerminalPollUsb (void);
+
 #endif

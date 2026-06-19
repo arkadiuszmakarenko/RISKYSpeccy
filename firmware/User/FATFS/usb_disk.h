@@ -34,4 +34,8 @@ uint8_t usb_scsi_request_sense (uint8_t *buf, uint16_t len);
 uint8_t msc_mass_storage_reset (void);
 void ClearUSB (void);
 
+/* Returns 1 if a USB MSC device is currently enumerated and ready,
+ * 0 otherwise. Safe to call from any context. */
+uint8_t USBH_IsReady (void);
+
 #endif

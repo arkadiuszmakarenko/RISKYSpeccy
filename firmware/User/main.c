@@ -63,6 +63,21 @@ int main (void) {
      ZX_TerminalWaitUsbDriveReady();
 
     for (;;) {
+        /* USB-state watchdog.  The file browser and TAP player are long-
+         * running blocking functions that previously never re-tested the
+         * USB host stack, so an unplug while they were running left the
+         * launcher in a wedged state.  Each iteration of the main loop
+         * asks the terminal layer whether the drive is still attached and
+         * jumps back to the insert-USB prompt if it isn't. */
+        ZX_TerminalPollUsb ();
+        if (ZX_TerminalUsbLost ()) {
+            printf ("main: USB drive lost, re-prompting\r\n");
+            ZX_TerminalClearPendingZ80Selection ();
+            ZX_TerminalClearPendingTapSelection ();
+            ZX_TerminalClearUsbLost ();
+            goto recheck_usb;
+        }
+
         /* Open file browser (blocks until the user selects a file or cancels). */
         if (ZX_TerminalCommandZ80Select (NULL)) {
             /* Z80 game launched inside the terminal; spin here forever.
@@ -136,5 +151,13 @@ int main (void) {
         continue;
 reopen_browser:
         ;
+recheck_usb:
+        /* Drive was unplugged: drop any in-flight selections, reset the
+         * host stack so the next attach is observed cleanly, and re-run
+         * the insert-USB prompt.  Loop back to the top of main(). */
+        ClearUSB();
+        USB_Initialization();
+        ZX_TerminalWaitUsbDriveReady();
+        continue;
     }
 }
