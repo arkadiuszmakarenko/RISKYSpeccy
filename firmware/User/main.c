@@ -83,16 +83,21 @@ int main (void) {
             /* Z80 game launched inside the terminal; spin here forever.
                Only a long-press hardware reset makes sense at this point.
                Also poll for an external ZX hardware reset: if the user
-               presses the Spectrum's reset button (wired to PC6), the cart
-               has already tristated ROMCS and zxprog re-runs in isolation,
-               so we must re-assert the cart and re-launch the file
-               browser — otherwise the launcher never reappears. */
+               presses the Spectrum's reset button (wired to PC6), zxprog
+               re-runs in isolation with the cart ISR re-armed by the
+               Spectrum's ROM-wins signalling — but the terminal/browser/
+               tap state in CH32 RAM (s_prev_valid, s_selector_font_mode,
+               pending tap selections, terminal char/attr model, etc.) is
+               now stale and trying to surgically re-engage the cart from
+               here leaves the launcher either invisible or showing a
+               stray yellow/green border flash.  Issue a full NVIC reset
+               so main() runs from the top: every peripheral is
+               reinitialised, the cart state machine starts clean, FATFS
+               is re-mounted, the file browser is reopened. */
             for (;;) {
                 if (ZX_HandleExternalResetIfAny ()) {
-                    printf ("ZX hardware reset detected — re-engaging cart\r\n");
-                    ZX_RomcsAssert();
-                    ZX_Z80Reset();
-                    break;
+                    printf ("ZX hardware reset detected — full CH32 reset\r\n");
+                    NVIC_SystemReset();
                 }
                 Handle_ResetButtonPA7();
             }
@@ -106,51 +111,42 @@ int main (void) {
             (ZX_TerminalPendingTapSelection()[0] != '\0')) {
 
             /* Wait for a short press that actually starts the tape.
-               Also bail out on a ZX hardware reset — falling back to the
-               file browser is the cleanest recovery. */
+               Also bail out on a ZX hardware reset — same reasoning as
+               the z80-spin path above: stale browser/tap/terminal state
+               in CH32 RAM makes a partial recovery unreliable, so we do
+               a full NVIC reset to restart cleanly from main(). */
             while (!TAP_Player_IsRunning()) {
                 if (ZX_HandleExternalResetIfAny ()) {
-                    printf ("ZX hardware reset detected — re-engaging cart\r\n");
-                    ZX_RomcsAssert();
-                    ZX_Z80Reset();
-                    ZX_TerminalClearPendingTapSelection();
-                    goto reopen_browser;
+                    printf ("ZX hardware reset detected — full CH32 reset\r\n");
+                    NVIC_SystemReset();
                 }
                 Handle_ResetButtonPA7();
             }
 
             /* Tape is running: keep polling (allows long-press reset and
-               external ZX reset). */
+               external ZX reset).  Same full-reset recovery model. */
             while (TAP_Player_IsRunning()) {
                 if (ZX_HandleExternalResetIfAny ()) {
-                    printf ("ZX hardware reset detected — re-engaging cart\r\n");
-                    TAP_Player_Stop();
-                    ZX_RomcsAssert();
-                    ZX_Z80Reset();
-                    ZX_TerminalClearPendingTapSelection();
-                    goto reopen_browser;
+                    printf ("ZX hardware reset detected — full CH32 reset\r\n");
+                    NVIC_SystemReset();
                 }
                 Handle_ResetButtonPA7();
             }
 
             /* Tape finished: the Z80 is now running the loaded program.
-               Spin here like the z80 snapshot path — long-press hardware
-               reset or external ZX reset both bring the launcher back. */
+               Spin here like the z80 snapshot path — ZX hardware reset
+               triggers a full CH32 reset to bring the launcher back. */
             ZX_TerminalClearPendingTapSelection();
             for (;;) {
                 if (ZX_HandleExternalResetIfAny ()) {
-                    printf ("ZX hardware reset detected — re-engaging cart\r\n");
-                    ZX_RomcsAssert();
-                    ZX_Z80Reset();
-                    break;
+                    printf ("ZX hardware reset detected — full CH32 reset\r\n");
+                    NVIC_SystemReset();
                 }
                 Handle_ResetButtonPA7();
             }
         }
         /* Nothing selected (user cancelled/escaped): loop and reopen browser. */
         continue;
-reopen_browser:
-        ;
 recheck_usb:
         /* Drive was unplugged: drop any in-flight selections, reset the
          * host stack so the next attach is observed cleanly, and re-run
