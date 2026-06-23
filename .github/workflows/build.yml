@@ -80,9 +80,22 @@ jobs:
           fi
 
           echo "✓ Toolchain located at: $GCC_ROOT"
-          echo "TOOLCHAIN_DIR=$GCC_ROOT" >> "$GITHUB_OUTPUT"
 
-          "$GCC_ROOT/bin/riscv-wch-elf-gcc" --version
+          # The extracted directory contains a SPACE in its name
+          # ("RISC-V Embedded GCC12"), and the Makefile's CC/OBJCOPY/etc.
+          # variables expand TOOLCHAIN_DIR with no quoting, which makes
+          # /bin/sh tokenize the path on whitespace.  Replace it with a
+          # symlink under a space-free path so the build can use the path
+          # without any quoting tricks.
+          SAFE_ROOT="/opt/wch-toolchain"
+          sudo mkdir -p "$SAFE_ROOT"
+          sudo ln -sfn "$GCC_ROOT" "$SAFE_ROOT/wch"
+          SAFE_GCC_ROOT="$SAFE_ROOT/wch"
+
+          echo "✓ Symlinked: $SAFE_GCC_ROOT -> $GCC_ROOT"
+          echo "TOOLCHAIN_DIR=$SAFE_GCC_ROOT" >> "$GITHUB_OUTPUT"
+
+          "$SAFE_GCC_ROOT/bin/riscv-wch-elf-gcc" --version
           echo "✓ Toolchain verified"
 
       - name: Build firmware
