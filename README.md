@@ -79,6 +79,29 @@ make clean
 
 Build outputs land in `build/`.
 
+### Continuous integration (GitHub Actions)
+
+A workflow at [`.github/workflows/build.yml`](.github/workflows/build.yml)
+builds the firmware on every push, pull request, tag, and manual dispatch.
+It:
+
+- installs the WCH RISC-V toolchain (V2.10) and SDCC from `apt`
+- runs `make` at the repo root
+- verifies that all expected artifacts (`Bootloader.bin`, `RISKYSpeccy.bin`,
+  `RISKYZXS.UPD`, `RISKYZXS_COMBINED.bin`) are produced
+- checks that the bootloader and app-update binaries fit their respective
+  flash regions
+- uploads the binaries as a workflow artifact
+  (`RISKYZXSpectrum-firmware`, retained for 90 days) and the listings/maps
+  as a separate logs artifact
+- on tag pushes (`v*`) and on `release` events, attaches the user-facing
+  binaries (`*.bin` / `*.UPD` at the top of `build/`) to a GitHub Release
+
+The default `latest` release is marked as prerelease and is updated on
+every non-PR run; tagged builds (`v1.2.3`, etc.) become stable releases.
+No secrets are required — the workflow uses the default `GITHUB_TOKEN`
+to create/update releases.
+
 ### Flashing options
 
 | Mode | Command | Output | When to use |

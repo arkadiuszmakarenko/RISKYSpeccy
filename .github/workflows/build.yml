@@ -17,7 +17,7 @@ permissions:
 jobs:
   build:
     name: Build RISKYZXSpectrum firmware
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-latest
 
     steps:
       - name: Checkout repository
@@ -49,43 +49,49 @@ jobs:
 
           echo "Toolchain installation complete."
 
-      - name: Verify toolchain installation
+      - name: Locate WCH RISC-V toolchain
+        id: toolchain
         run: |
-          # The archive layout puts the toolchain under
-          #   MRS_Toolchain_Linux_x64_V210/RISC-V Embedded GCC12/bin
-          # The Makefile expects TOOLCHAIN_DIR to point at the directory that
-          # contains the `bin/` subdirectory.
-          TOOLCHAIN_BIN="/opt/riscv-toolchain/MRS_Toolchain_Linux_x64_V210/RISC-V Embedded GCC12/bin"
+          # The archive extracts WITHOUT a top-level wrapper directory, so
+          # the bin/ subdir lives directly under the extraction root.  We
+          # need the variant that ships the WCH-specific `riscv-wch-elf-`
+          # toolchain prefix (the Makefile's TOOL_PREFIX), which is the
+          # "RISC-V Embedded GCC12" directory.
+          set -e
+          EXTRACT_ROOT="/opt/riscv-toolchain"
 
-          if [ ! -d "$TOOLCHAIN_BIN" ]; then
-            echo "ERROR: Toolchain bin directory not found at: $TOOLCHAIN_BIN"
-            echo "Available directories under /opt/riscv-toolchain:"
-            find /opt/riscv-toolchain -maxdepth 3 -type d
+          GCC_ROOT=""
+          for candidate in \
+              "$EXTRACT_ROOT/RISC-V Embedded GCC12" \
+              "$EXTRACT_ROOT/RISC-V Embedded GCC"; do
+            if [ -x "$candidate/bin/riscv-wch-elf-gcc" ]; then
+              GCC_ROOT="$candidate"
+              break
+            fi
+          done
+
+          if [ -z "$GCC_ROOT" ]; then
+            echo "ERROR: Could not find a WCH RISC-V toolchain under $EXTRACT_ROOT"
+            echo "Top-level contents:"
+            ls -la "$EXTRACT_ROOT"
+            echo "Searched for bin/riscv-wch-elf-gcc, found:"
+            find "$EXTRACT_ROOT" -maxdepth 4 -name 'riscv-wch-elf-gcc' || true
             exit 1
           fi
 
-          if [ ! -x "$TOOLCHAIN_BIN/riscv-wch-elf-gcc" ]; then
-            echo "ERROR: Compiler not found at: $TOOLCHAIN_BIN/riscv-wch-elf-gcc"
-            echo "Available files in toolchain bin directory:"
-            ls -la "$TOOLCHAIN_BIN"
-            exit 1
-          fi
+          echo "✓ Toolchain located at: $GCC_ROOT"
+          echo "TOOLCHAIN_DIR=$GCC_ROOT" >> "$GITHUB_OUTPUT"
 
-          echo "✓ Toolchain directory exists"
-          echo "✓ Compiler found: $TOOLCHAIN_BIN/riscv-wch-elf-gcc"
-
-          "$TOOLCHAIN_BIN/riscv-wch-elf-gcc" --version || {
-            echo "ERROR: Compiler execution failed"
-            exit 1
-          }
-
-          echo "✓ Toolchain verification complete"
+          "$GCC_ROOT/bin/riscv-wch-elf-gcc" --version
+          echo "✓ Toolchain verified"
 
       - name: Build firmware
+        env:
+          TOOLCHAIN_DIR: ${{ steps.toolchain.outputs.TOOLCHAIN_DIR }}
         run: |
+          echo "Using TOOLCHAIN_DIR=$TOOLCHAIN_DIR"
           echo "Building all firmware variants..."
-          # Makefile expects TOOLCHAIN_DIR = the directory containing `bin/`.
-          make TOOLCHAIN_DIR="/opt/riscv-toolchain/MRS_Toolchain_Linux_x64_V210/RISC-V Embedded GCC12"
+          make TOOLCHAIN_DIR="$TOOLCHAIN_DIR"
 
           echo "Built artifacts:"
           make versions
@@ -175,9 +181,13 @@ jobs:
         uses: actions/upload-artifact@v4.4.0
         with:
           name: RISKYZXSpectrum-build-logs
-          path: |
-            build/**/*.lst
-            build/**/*.siz
+          # upload-artifact v4 resolves globs relative to GITHUB_WORKSPACE and
+          # computes the common directory prefix across all patterns. When two
+          # patterns (`build/**/*.lst` and `build/**/*.siz`) are listed
+          # separately, the prefix logic can drop the match.  Using a single
+          # combined pattern with brace expansion avoids this; pairing it with
+          # the leading-`build/` anchor keeps the upload scoped.
+          path: build/**/*.{lst,siz}
           if-no-files-found: ignore
           retention-days: 30
 
