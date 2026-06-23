@@ -23,7 +23,20 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4.2.0
 
+      - name: Cache apt package downloads
+        id: cache-apt
+        uses: actions/cache@v4.2.0
+        with:
+          path: |
+            /var/cache/apt/archives
+            /var/lib/apt
+          # Invalidate when the apt package list itself changes.
+          key: apt-${{ runner.os }}-${{ hashFiles('.github/workflows/build.yml') }}
+          restore-keys: |
+            apt-${{ runner.os }}-
+
       - name: Install system dependencies
+        if: steps.cache-apt.outputs.cache-hit != 'true'
         run: |
           sudo apt-get update
           sudo apt-get install -y \
@@ -35,9 +48,51 @@ jobs:
             sdcc \
             binutils
 
-      - name: Download WCH RISC-V toolchain
+      - name: Ensure system dependencies (cache hit path)
+        if: steps.cache-apt.outputs.cache-hit == 'true'
+        # On a cache hit, the .deb files are already on disk, but the
+        # packages may not yet be installed on a *fresh* VM.  Re-install
+        # with --no-download to use only the cached debs.
         run: |
-          echo "Downloading WCH RISC-V toolchain V2.10..."
+          sudo apt-get update -o Dir::Cache::Archives=/var/cache/apt/archives
+          sudo apt-get install -y --no-download \
+            build-essential \
+            make \
+            wget \
+            xz-utils \
+            tar \
+            sdcc \
+            binutils || {
+            # Fallback: cache hit on archives but they're stale or
+            # partial.  Force a refresh.
+            echo "Cached apt install failed; refreshing..."
+            sudo apt-get update
+            sudo apt-get install -y \
+              build-essential \
+              make \
+              wget \
+              xz-utils \
+              tar \
+              sdcc \
+              binutils
+          }
+
+      - name: Cache WCH RISC-V toolchain
+        id: cache-toolchain
+        uses: actions/cache@v4.2.0
+        with:
+          # Cache BOTH the extracted tree and the symlink we create on top.
+          path: |
+            /opt/riscv-toolchain
+            /opt/wch-toolchain
+          key: wch-toolchain-v210-${{ runner.os }}-${{ runner.arch }}
+          restore-keys: |
+            wch-toolchain-v210-${{ runner.os }}-
+
+      - name: Download and extract WCH RISC-V toolchain
+        if: steps.cache-toolchain.outputs.cache-hit != 'true'
+        run: |
+          echo "Cache miss — downloading toolchain..."
           wget -q --show-progress \
             https://github.com/arkadiuszmakarenko/WCHToolchain/releases/download/ToolchainV210/MRS_Toolchain_Linux_x64_V210.tar.xz \
             -O /tmp/toolchain.tar.xz
@@ -47,7 +102,7 @@ jobs:
           sudo tar -xf /tmp/toolchain.tar.xz -C /opt/riscv-toolchain
           rm /tmp/toolchain.tar.xz
 
-          echo "Toolchain installation complete."
+          echo "✓ Toolchain installed."
 
       - name: Locate WCH RISC-V toolchain
         id: toolchain
@@ -86,7 +141,9 @@ jobs:
           # variables expand TOOLCHAIN_DIR with no quoting, which makes
           # /bin/sh tokenize the path on whitespace.  Replace it with a
           # symlink under a space-free path so the build can use the path
-          # without any quoting tricks.
+          # without any quoting tricks.  This step is idempotent — both
+          # directories are also covered by actions/cache, so on a cache
+          # hit the symlink is restored as-is.
           SAFE_ROOT="/opt/wch-toolchain"
           sudo mkdir -p "$SAFE_ROOT"
           sudo ln -sfn "$GCC_ROOT" "$SAFE_ROOT/wch"
@@ -97,6 +154,17 @@ jobs:
 
           "$SAFE_GCC_ROOT/bin/riscv-wch-elf-gcc" --version
           echo "✓ Toolchain verified"
+
+      - name: Cache build directory
+        id: cache-build
+        uses: actions/cache@v4.2.0
+        with:
+          path: build
+          # Per-commit cache so a feature branch shares state with the
+          # commit it forked from via the restore-keys fallback.
+          key: build-${{ runner.os }}-${{ github.sha }}
+          restore-keys: |
+            build-${{ runner.os }}-
 
       - name: Build firmware
         env:
@@ -112,6 +180,16 @@ jobs:
       - name: Verify build artifacts
         run: |
           echo "Verifying firmware builds..."
+
+          # Flash layout (CH32V303 with SRAM_CODE_MODE=0, from the linker
+          # scripts under firmware/Ld/ and Bootloader/Ld/):
+          #   0x00000000..0x00004000  16 KB   bootloader region
+          #   0x00004000..0x00030000 176 KB   app region (RISKYZXS.UPD)
+          #   0x00000000..0x00030000 192 KB   standalone (RISKYSpeccy.bin)
+          BOOT_MAX=$((16 * 1024))           # 16384
+          APP_MAX=$((176 * 1024))           # 180224
+          STANDALONE_MAX=$((192 * 1024))    # 196608
+          COMBINED_OFFSET=$BOOT_MAX
 
           # Individual firmware binaries
           if [ ! -f "build/bootloader/Bootloader.bin" ]; then
@@ -146,26 +224,34 @@ jobs:
           size_combined=$(stat -c%s "build/RISKYZXS_COMBINED.bin")
           size_standalone=$(stat -c%s "build/RISKYSpeccy.bin")
 
-          echo "Bootloader size:         $size_boot bytes (max 16384 bytes — 16KB region at 0x00000000)"
-          echo "RISKYZXS.UPD size:       $size_app bytes (must be <= $((65536 - 16384)) bytes — region 0x00004000..0x00010000)"
-          echo "RISKYSpeccy.bin size:    $size_standalone bytes (standalone app)"
-          echo "Combined size:           $size_combined bytes (bootloader padded to 16384 + app)"
+          echo "Bootloader size:         $size_boot bytes (max $BOOT_MAX bytes — 16KB region at 0x00000000..0x00004000)"
+          echo "RISKYZXS.UPD size:       $size_app bytes (max $APP_MAX bytes — 176KB region at 0x00004000..0x00030000)"
+          echo "RISKYSpeccy.bin size:    $size_standalone bytes (max $STANDALONE_MAX bytes — 192KB standalone)"
+          echo "Combined size:           $size_combined bytes (expected $((COMBINED_OFFSET + size_app)) bytes = 16KB pad + app)"
 
           # Bootloader must fit in the 16KB region at flash base.
-          if [ "$size_boot" -gt 16384 ]; then
+          if [ "$size_boot" -gt $BOOT_MAX ]; then
             echo "ERROR: Bootloader exceeds 16KB region"
             exit 1
           fi
 
-          # App-update must fit between 0x4000 and the end of flash.
-          if [ "$size_app" -gt $((65536 - 16384)) ]; then
-            echo "ERROR: RISKYZXS.UPD exceeds available app region"
+          # App-update must fit in the 176KB region starting at 0x4000.
+          if [ "$size_app" -gt $APP_MAX ]; then
+            echo "ERROR: RISKYZXS.UPD exceeds available app region (${APP_MAX} bytes)"
             exit 1
           fi
 
-          # Combined image must be at least BOOT_OFFSET + app size.
-          if [ "$size_combined" -lt $((16384 + size_app)) ]; then
-            echo "ERROR: Combined binary is smaller than expected"
+          # Standalone image must fit in the full 192KB flash.
+          if [ "$size_standalone" -gt $STANDALONE_MAX ]; then
+            echo "ERROR: RISKYSpeccy.bin exceeds standalone flash region (${STANDALONE_MAX} bytes)"
+            exit 1
+          fi
+
+          # Combined image is bootloader padded to 16KB then app appended;
+          # its size must equal exactly COMBINED_OFFSET + app size.
+          expected_combined=$((COMBINED_OFFSET + size_app))
+          if [ "$size_combined" -ne $expected_combined ]; then
+            echo "ERROR: Combined binary size mismatch (expected $expected_combined, got $size_combined)"
             exit 1
           fi
 
