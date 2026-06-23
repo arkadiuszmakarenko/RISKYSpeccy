@@ -307,13 +307,26 @@ jobs:
             TITLE="Latest build ($(date -u '+%Y-%m-%d %H:%M UTC'))"
           fi
 
-          # Collect top-level release assets (the *.bin and *.UPD that ship to
-          # end users).  Bootloader and intermediate listings go to the workflow
-          # artifact instead.
+          # Collect release assets: top-level *.bin / *.UPD plus the standalone
+          # bootloader image.  We use a NUL-separated find + sort -z so paths
+          # with spaces (none today, but cheap to be safe) and any future
+          # bootloader subdir layout are handled cleanly.  Intermediate
+          # listings (.lst/.siz/.map) still go to the workflow artifact, not
+          # the release.
           FILES=()
           while IFS= read -r -d '' file; do
             FILES+=("$file")
-          done < <(find build -maxdepth 1 -type f \( -name "*.bin" -o -name "*.UPD" \) -print0 | sort -z)
+          done < <(find build -type f \
+              \( -name "*.bin" -o -name "*.UPD" \) \
+              ! -path "build/app_*/*" \
+              ! -path "build/*/Core/*" \
+              ! -path "build/*/Debug/*" \
+              ! -path "build/*/Peripheral/*" \
+              ! -path "build/*/Startup/*" \
+              ! -path "build/*/User/*" \
+              ! -path "build/zx_src/*" \
+              ! -name "*.hex" ! -name "*.elf" ! -name "*.map" \
+              -print0 | sort -z)
 
           if [ ${#FILES[@]} -eq 0 ]; then
             echo "ERROR: No release assets found in build/"
