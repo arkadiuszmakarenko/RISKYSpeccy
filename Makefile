@@ -632,19 +632,29 @@ reboot: check-minichlink
 # Default to the project's required mode.
 SPLIT_MODE ?= 0
 
-# Validate the mode argument and compute the option-byte half-word.
+# Validate the mode argument and compute the FLASH/SRAM kB pair for minichlink's
+# `-S FLASH_kbytes SRAM_kbytes` option.  These are the standard CH32V30x
+# SRAM_CODE_MODE options exposed via the USER option byte at 0x1FFFF802.
 ifeq ($(SPLIT_MODE),0)
 SPLIT_OB_WORD := 0xC03F
-SPLIT_DESC    := "192K FLASH + 128K RAM"
+SPLIT_FLASH  := 192
+SPLIT_SRAM   := 128
+SPLIT_DESC   := "192K FLASH + 128K RAM"
 else ifeq ($(SPLIT_MODE),1)
 SPLIT_OB_WORD := 0x807F
-SPLIT_DESC    := "224K FLASH + 96K RAM"
+SPLIT_FLASH  := 224
+SPLIT_SRAM   := 96
+SPLIT_DESC   := "224K FLASH + 96K RAM"
 else ifeq ($(SPLIT_MODE),2)
 SPLIT_OB_WORD := 0x40BF
-SPLIT_DESC    := "256K FLASH + 64K RAM"
+SPLIT_FLASH  := 256
+SPLIT_SRAM   := 64
+SPLIT_DESC   := "256K FLASH + 64K RAM"
 else ifeq ($(SPLIT_MODE),3)
 SPLIT_OB_WORD := 0x00FF
-SPLIT_DESC    := "288K FLASH + 32K RAM"
+SPLIT_FLASH  := 288
+SPLIT_SRAM   := 32
+SPLIT_DESC   := "288K FLASH + 32K RAM"
 else
 $(error Invalid SPLIT_MODE='$(SPLIT_MODE)'; must be 0, 1, 2, or 3)
 endif
@@ -678,13 +688,13 @@ split-set-openocd:
 		-c "init; halt; flash write_word 0x1FFFF802 $(SPLIT_OB_WORD); reset; exit"
 	@echo "Split updated. Power-cycle the board before flashing firmware."
 
-# Set SRAM_CODE_MODE via minichlink.  minichlink exposes the user option
-# byte at the standard address 0x1FFFF802; we write the half-word there and
-# reboot the chip so the new value takes effect.
+# Set SRAM_CODE_MODE via minichlink.  minichlink exposes a dedicated `-S
+# FLASH_kbytes SRAM_kbytes` option that programs the USER option byte and
+# reboots the chip in one step.
 split-set-minichlink: check-minichlink
 	$(SPLIT_WARN)
-	@echo "Writing option byte 0x1FFFF802 = $(SPLIT_OB_WORD) ..."
-	"$(MINICHLINK)" -w "$(SPLIT_OB_WORD)" 0x1FFFF802 -b
+	@echo "Programming SRAM_CODE_MODE via minichlink -S $(SPLIT_FLASH) $(SPLIT_SRAM) ..."
+	"$(MINICHLINK)" -S $(SPLIT_FLASH) $(SPLIT_SRAM) -b
 	@echo "Split updated. Power-cycle the board before flashing firmware."
 
 # Convenience dispatcher: pick the programmer from TOOL=minichlink|openocd.
