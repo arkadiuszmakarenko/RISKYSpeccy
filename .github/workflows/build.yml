@@ -2,11 +2,11 @@ name: Build Firmware
 
 on:
   push:
-     branches: [ main, master, v0.2 ]
+    branches: [ main, master, v0.2 ]
     tags:
       - 'v*'
   pull_request:
-     branches: [ main, master, v0.2 ]
+    branches: [ main, master, v0.2 ] 
   release:
     types: [ created, published ]
   workflow_dispatch:
