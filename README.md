@@ -82,7 +82,8 @@ Build outputs land in `build/`.
 ### Continuous integration (GitHub Actions)
 
 A workflow at [`.github/workflows/build.yml`](.github/workflows/build.yml)
-builds the firmware on every push, pull request, tag, and manual dispatch.
+builds the firmware on pushes to `main`, `master`, and `v0.2`, plus pull
+requests, tags, and manual dispatch.
 It:
 
 - installs the WCH RISC-V toolchain (V2.10) and SDCC from `apt`
@@ -232,4 +233,3 @@ all other bits at default) in the low byte and its complement `0xC0` in
 the high byte, as required by the option byte format.
 
 > After writing, power-cycle the board before flashing firmware.
-
