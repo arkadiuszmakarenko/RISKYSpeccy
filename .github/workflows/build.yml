@@ -1,0 +1,227 @@
+name: Build Firmware
+
+on:
+  push:
+    branches: [ main, master ]
+    tags:
+      - 'v*'
+  pull_request:
+    branches: [ main, master ]
+  release:
+    types: [ created, published ]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Build RISKYZXSpectrum firmware
+    runs-on: ubuntu-22.04
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4.2.0
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential \
+            make \
+            wget \
+            xz-utils \
+            tar \
+            sdcc \
+            binutils
+
+      - name: Download WCH RISC-V toolchain
+        run: |
+          echo "Downloading WCH RISC-V toolchain V2.10..."
+          wget -q --show-progress \
+            https://github.com/arkadiuszmakarenko/WCHToolchain/releases/download/ToolchainV210/MRS_Toolchain_Linux_x64_V210.tar.xz \
+            -O /tmp/toolchain.tar.xz
+
+          echo "Extracting toolchain to /opt/riscv-toolchain..."
+          sudo mkdir -p /opt/riscv-toolchain
+          sudo tar -xf /tmp/toolchain.tar.xz -C /opt/riscv-toolchain
+          rm /tmp/toolchain.tar.xz
+
+          echo "Toolchain installation complete."
+
+      - name: Verify toolchain installation
+        run: |
+          # The archive layout puts the toolchain under
+          #   MRS_Toolchain_Linux_x64_V210/RISC-V Embedded GCC12/bin
+          # The Makefile expects TOOLCHAIN_DIR to point at the directory that
+          # contains the `bin/` subdirectory.
+          TOOLCHAIN_BIN="/opt/riscv-toolchain/MRS_Toolchain_Linux_x64_V210/RISC-V Embedded GCC12/bin"
+
+          if [ ! -d "$TOOLCHAIN_BIN" ]; then
+            echo "ERROR: Toolchain bin directory not found at: $TOOLCHAIN_BIN"
+            echo "Available directories under /opt/riscv-toolchain:"
+            find /opt/riscv-toolchain -maxdepth 3 -type d
+            exit 1
+          fi
+
+          if [ ! -x "$TOOLCHAIN_BIN/riscv-wch-elf-gcc" ]; then
+            echo "ERROR: Compiler not found at: $TOOLCHAIN_BIN/riscv-wch-elf-gcc"
+            echo "Available files in toolchain bin directory:"
+            ls -la "$TOOLCHAIN_BIN"
+            exit 1
+          fi
+
+          echo "✓ Toolchain directory exists"
+          echo "✓ Compiler found: $TOOLCHAIN_BIN/riscv-wch-elf-gcc"
+
+          "$TOOLCHAIN_BIN/riscv-wch-elf-gcc" --version || {
+            echo "ERROR: Compiler execution failed"
+            exit 1
+          }
+
+          echo "✓ Toolchain verification complete"
+
+      - name: Build firmware
+        run: |
+          echo "Building all firmware variants..."
+          # Makefile expects TOOLCHAIN_DIR = the directory containing `bin/`.
+          make TOOLCHAIN_DIR="/opt/riscv-toolchain/MRS_Toolchain_Linux_x64_V210/RISC-V Embedded GCC12"
+
+          echo "Built artifacts:"
+          make versions
+
+      - name: Verify build artifacts
+        run: |
+          echo "Verifying firmware builds..."
+
+          # Individual firmware binaries
+          if [ ! -f "build/bootloader/Bootloader.bin" ]; then
+            echo "ERROR: build/bootloader/Bootloader.bin not found"
+            exit 1
+          fi
+          echo "✓ Bootloader.bin found"
+
+          if [ ! -f "build/RISKYSpeccy.bin" ]; then
+            echo "ERROR: build/RISKYSpeccy.bin not found"
+            exit 1
+          fi
+          echo "✓ RISKYSpeccy.bin found"
+
+          if [ ! -f "build/RISKYZXS.UPD" ]; then
+            echo "ERROR: build/RISKYZXS.UPD not found"
+            exit 1
+          fi
+          echo "✓ RISKYZXS.UPD found"
+
+          if [ ! -f "build/RISKYZXS_COMBINED.bin" ]; then
+            echo "ERROR: build/RISKYZXS_COMBINED.bin not found"
+            exit 1
+          fi
+          echo "✓ RISKYZXS_COMBINED.bin found"
+
+          echo ""
+          echo "Checking binary sizes..."
+
+          size_boot=$(stat -c%s "build/bootloader/Bootloader.bin")
+          size_app=$(stat -c%s "build/RISKYZXS.UPD")
+          size_combined=$(stat -c%s "build/RISKYZXS_COMBINED.bin")
+          size_standalone=$(stat -c%s "build/RISKYSpeccy.bin")
+
+          echo "Bootloader size:         $size_boot bytes (max 16384 bytes — 16KB region at 0x00000000)"
+          echo "RISKYZXS.UPD size:       $size_app bytes (must be <= $((65536 - 16384)) bytes — region 0x00004000..0x00010000)"
+          echo "RISKYSpeccy.bin size:    $size_standalone bytes (standalone app)"
+          echo "Combined size:           $size_combined bytes (bootloader padded to 16384 + app)"
+
+          # Bootloader must fit in the 16KB region at flash base.
+          if [ "$size_boot" -gt 16384 ]; then
+            echo "ERROR: Bootloader exceeds 16KB region"
+            exit 1
+          fi
+
+          # App-update must fit between 0x4000 and the end of flash.
+          if [ "$size_app" -gt $((65536 - 16384)) ]; then
+            echo "ERROR: RISKYZXS.UPD exceeds available app region"
+            exit 1
+          fi
+
+          # Combined image must be at least BOOT_OFFSET + app size.
+          if [ "$size_combined" -lt $((16384 + size_app)) ]; then
+            echo "ERROR: Combined binary is smaller than expected"
+            exit 1
+          fi
+
+          echo "✓ All size checks passed"
+
+      - name: List build artifacts
+        run: |
+          echo "Build artifacts summary:"
+          echo "========================"
+          find build -type f \( -name "*.bin" -o -name "*.UPD" -o -name "*.elf" -o -name "*.hex" \) -exec ls -lh {} \;
+
+      - name: Upload combined release artifacts
+        uses: actions/upload-artifact@v4.4.0
+        with:
+          name: RISKYZXSpectrum-firmware
+          path: |
+            build/RISKYZXS_COMBINED.bin
+            build/RISKYZXS.UPD
+            build/RISKYSpeccy.bin
+            build/bootloader/Bootloader.bin
+          if-no-files-found: error
+          retention-days: 90
+
+      - name: Upload logs and listings
+        if: always()
+        uses: actions/upload-artifact@v4.4.0
+        with:
+          name: RISKYZXSpectrum-build-logs
+          path: |
+            build/**/*.lst
+            build/**/*.siz
+          if-no-files-found: ignore
+          retention-days: 30
+
+      - name: Create or update GitHub Release assets
+        if: github.event_name != 'pull_request'
+        shell: bash
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          # Use the tag name for tag pushes, otherwise use "latest"
+          if [[ "${GITHUB_REF}" == refs/tags/* ]]; then
+            TAG="${GITHUB_REF_NAME}"
+            PRERELEASE=""
+            TITLE="${TAG}"
+          else
+            TAG="latest"
+            PRERELEASE="--prerelease"
+            TITLE="Latest build ($(date -u '+%Y-%m-%d %H:%M UTC'))"
+          fi
+
+          # Collect top-level release assets (the *.bin and *.UPD that ship to
+          # end users).  Bootloader and intermediate listings go to the workflow
+          # artifact instead.
+          FILES=()
+          while IFS= read -r -d '' file; do
+            FILES+=("$file")
+          done < <(find build -maxdepth 1 -type f \( -name "*.bin" -o -name "*.UPD" \) -print0 | sort -z)
+
+          if [ ${#FILES[@]} -eq 0 ]; then
+            echo "ERROR: No release assets found in build/"
+            exit 1
+          fi
+
+          echo "Release assets:"
+          printf ' - %s\n' "${FILES[@]}"
+
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "Release $TAG already exists. Updating assets..."
+            gh release edit "$TAG" --title "$TITLE" $PRERELEASE
+            gh release upload "$TAG" "${FILES[@]}" --clobber
+          else
+            echo "Creating release $TAG..."
+            gh release create "$TAG" "${FILES[@]}" \
+              --title "$TITLE" \
+              --generate-notes \
+              $PRERELEASE
+          fi
