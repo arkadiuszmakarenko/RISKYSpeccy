@@ -1176,6 +1176,26 @@ static int ZX_BrowserShowLoadError (const char *path, int rc) {
     return ZX_TermCommit();
 }
 
+static int ZX_BrowserShowUnsupportedError (const char *path) {
+    uint8_t normal_attr = (uint8_t)((7u << 3) | 0u);
+    uint8_t alert_attr = (uint8_t)((2u << 3) | 7u);
+    uint8_t red_attr = (uint8_t)((7u << 3) | 2u);
+
+    ZX_TermModelClear();
+    ZX_TermModelWriteAt (0u, 0u, "RISKY SPECCY", normal_attr);
+    ZX_TermModelWriteAt (0u, 14u, FIRMWARE_VERSION_STRING, normal_attr);
+    ZX_TermModelWriteAt (2u, 0u, "UNSUPPORTED FILE FORMAT", alert_attr);
+    ZX_TermModelWriteAt (4u, 0u, "THIS FILE FORMAT IS", red_attr);
+    ZX_TermModelWriteAt (5u, 0u, "NOT SUPPORTED", red_attr);
+    ZX_TermModelWriteAt (7u, 0u, "FILE:", normal_attr);
+    ZX_TermModelWriteAt (8u, 0u, (path != NULL) ? path : "(unknown)", normal_attr);
+    ZX_TermModelWriteAt (10u, 0u, "SUPPORTED: .Z80 .TAP .TZX .ROM", normal_attr);
+
+    ZX_TermModelWriteAt (12u, 0u, "PRESS ANY KEY TO RETURN", red_attr);
+
+    return ZX_TermCommit();
+}
+
 static int ZX_BrowserShowTapReady (const char *path) {
     uint8_t normal_attr = (uint8_t)((7u << 3) | 0u);
     uint8_t alert_attr = (uint8_t)((1u << 3) | 7u);
@@ -1946,7 +1966,7 @@ int ZX_TerminalCommandZ80Select (const char *path) {
                 ZX_RomcsRelease();
                 ZX_Z80Reset();
                 goto done;
-            } else {
+            } else if (ZX_HasZ80Extension (entry_name)) {
                 /* Show snapshot info page and wait for confirmation. */
                 {
                     Z80FileInfo fi;
@@ -2012,6 +2032,18 @@ int ZX_TerminalCommandZ80Select (const char *path) {
                         suppress_enter_loops = 20u;
                     }
                 }
+            } else {
+                /* Unsupported file format */
+                printf ("z80select: unsupported file format: %s\r\n", full_path);
+                if (!ZX_BrowserShowUnsupportedError (full_path)) {
+                    printf ("WARN: z80select unsupported error screen draw timeout\r\n");
+                }
+                ZX_WaitAnyKey();
+
+                if (!ZX_BrowserRenderRetry (cur_path, selected)) {
+                    printf ("WARN: z80select redraw timeout\r\n");
+                }
+                suppress_enter_loops = 20u;
             }
             continue;
             }   /* close scope that contains entry_name / entry_is_dir */
