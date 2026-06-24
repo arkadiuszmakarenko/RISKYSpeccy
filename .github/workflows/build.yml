@@ -296,14 +296,21 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          # Use the tag name for tag pushes, otherwise use "latest"
+          # Use the tag name for tag pushes, otherwise use "latest".
+          #
+          # IMPORTANT: do NOT pass --prerelease for the rolling "latest"
+          # release.  GitHub only auto-marks a release as the project's
+          # "Latest" badge when it is *not* a prerelease, so passing
+          # --prerelease here would leave the badge stuck on the most
+          # recent tag-based (stable) release forever, even though we are
+          # actively overwriting the "latest" tag's assets below.
           if [[ "${GITHUB_REF}" == refs/tags/* ]]; then
             TAG="${GITHUB_REF_NAME}"
             PRERELEASE=""
             TITLE="${TAG}"
           else
             TAG="latest"
-            PRERELEASE="--prerelease"
+            PRERELEASE=""
             TITLE="Latest build ($(date -u '+%Y-%m-%d %H:%M UTC'))"
           fi
 
@@ -346,4 +353,16 @@ jobs:
               --title "$TITLE" \
               --generate-notes \
               $PRERELEASE
+          fi
+
+          # Migration helper: if a previous run created the "latest"
+          # release with --prerelease, the "Latest" badge on the
+          # repository's Releases page will stay pinned to whatever the
+          # most recent tag-based release is.  Clear the prerelease flag
+          # on "latest" so GitHub considers it the current Latest
+          # release.  This is idempotent: running it on an already-stable
+          # release is a no-op.
+          if [[ "$TAG" == "latest" ]]; then
+            echo "Ensuring '$TAG' is not marked as a prerelease..."
+            gh release edit "$TAG" --prerelease=false || true
           fi
