@@ -8,6 +8,9 @@ and provides:
 - **Tape player** — play `.tap` / `.tzx` files by injecting the EAR signal
   directly onto the data bus, compatible with the Spectrum's built-in tape
   loader.
+- **Interface 2 ROM cart** — load `.rom` / `.bin` files (up to 16 KB) as an
+  Interface 2 style cartridge ROM, mapped into the Spectrum's 0x0000-0x3FFF
+  region.
 - **On-screen UI** — full-screen file browser and VT100-compatible terminal
   rendered by the CH32 onto the ZX screen via the NMI mailbox, without any
   Z80 cooperation.
